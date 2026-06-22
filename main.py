@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import json
 import logging
 import os
 import re
@@ -26,6 +27,33 @@ log = logging.getLogger(__name__)
 
 NUM_FRAMES = 15
 FRAME_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
+
+# ── analyze 엔드포인트용 정적 프롬프트 ────────────────────────────────────────
+ANALYZE_VLM_PROMPT = (
+    "이 연속된 프레임들은 작업 현장 CCTV 영상입니다. "
+    "프레임에 보이는 사람들의 행동과 현재 상황을 자세히 설명해줘."
+)
+ANALYZE_VLM_MAX_TOKENS = 300
+ANALYZE_LLM_MAX_TOKENS = 200
+
+ANALYZE_LLM_PROMPT_TEMPLATE = (
+    "다음은 작업 현장 CCTV 영상을 분석한 설명이다:\n\n"
+    "{vlm_output}\n\n"
+    "위 설명에서 아래 4가지 위험 행동이 감지되는지 판단하라:\n"
+    "1. hat_action: 안전모를 착용하지 않았거나 벗는 행동\n"
+    "2. touch_action: 스피커를 만지는 행동\n"
+    "3. dangerInOut_action: 금지 구역에 출입하는 행동\n"
+    "4. ladder_action: 사다리를 올라가거나 단독으로 사다리 작업을 하는 행동\n\n"
+    '아래 JSON 형식으로만 응답하라. 다른 텍스트는 절대 출력하지 마라.\n'
+    '{{"action": "감지된_행동_키를_쉼표로_구분", "tts_message": "경고_메시지"}}\n\n'
+    "- action: 감지된 행동 키만 쉼표 구분으로 나열. 없으면 빈 문자열.\n"
+    "- tts_message: 감지된 행동에 대해 구체적으로 왜 위험한지 설명하고 "
+    '"행동을 중단하십시오"로 끝나는 경고 메시지. 없으면 빈 문자열.\n\n'
+    "예시:\n"
+    '{{"action": "hat_action,ladder_action", '
+    '"tts_message": "안전모를 착용하지 않은 상태에서 단독 사다리 작업을 하고 있어 위험합니다. 안전모를 착용하고 사다리 작업을 중단하십시오"}}\n'
+    '{{"action": "", "tts_message": ""}}'
+)
 
 # ── 런타임 (startup 때 초기화) ─────────────────────────────────────────────────
 _runtime: Any = None
@@ -159,11 +187,23 @@ class ConfigUpdateResponse(BaseModel):
     message: str
 
 
+class AnalyzeRequest(BaseModel):
+    dir_path: str
+
+
+class AnalyzeResponse(BaseModel):
+    request_id: str
+    action: str
+    tts_message: str
+    vlm_description: str
+    elapsed_sec: float
+
+
 # ── 유틸 ──────────────────────────────────────────────────────────────────────
 def collect_frames(folder: Path) -> list[Path]:
     """
     frame_01.jpg / frame1.jpg 형식을 모두 지원.
-    frame 번호 순으로 정렬 후 반환. (최대 NUM_FRAMES장)
+    frame 번호 순으로 정렬 후 반환.
     """
     candidates: list[tuple[int, Path]] = []
     for f in folder.iterdir():
@@ -176,6 +216,15 @@ def collect_frames(folder: Path) -> list[Path]:
 
     candidates.sort(key=lambda x: x[0])
     return [p for _, p in candidates]
+
+
+def select_frames(frames: list[Path], target: int = NUM_FRAMES) -> list[Path]:
+    """30장 등에서 target(15)장을 균등 간격으로 선택."""
+    n = len(frames)
+    if n <= target:
+        return frames
+    indices = [round(i * (n - 1) / (target - 1)) for i in range(target)]
+    return [frames[i] for i in indices]
 
 
 def _sync_infer(
@@ -209,6 +258,42 @@ async def run_inference(
         return await asyncio.to_thread(
             _sync_infer, frame_paths, prompt, max_tokens, temperature
         )
+
+
+def _sync_llm_infer(prompt: str, max_tokens: int, temperature: float) -> str:
+    """텍스트만 입력하여 추론. 블로킹 — to_thread로 호출."""
+    contents = [_edgellm.MessageContent("text", prompt)]
+    request = _edgellm.create_generation_request(
+        batch_messages=[[_edgellm.Message("user", contents)]],
+        temperature=temperature,
+        max_generate_length=max_tokens,
+        apply_chat_template=True,
+        add_generation_prompt=True,
+    )
+    response = _runtime.handle_request(request)
+    return response.output_texts[0] if response.output_texts else ""
+
+
+async def run_llm_inference(
+    prompt: str, max_tokens: int, temperature: float,
+) -> str:
+    async with _gpu_sem:
+        return await asyncio.to_thread(
+            _sync_llm_infer, prompt, max_tokens, temperature
+        )
+
+
+def _parse_llm_json(text: str) -> dict:
+    """LLM 출력에서 JSON을 추출. 실패 시 빈 결과 반환."""
+    text = text.strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1:
+        try:
+            return json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            pass
+    return {"action": "", "tts_message": ""}
 
 
 async def process_item(slot: SlotState, item: QueueItem) -> None:
@@ -315,6 +400,61 @@ async def infer(req: InferRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
     return result
+
+
+@app.post("/analyze", response_model=AnalyzeResponse)
+async def analyze(req: AnalyzeRequest):
+    """
+    dir_path 하나만 받아 VLM→LLM 2단계 분석 수행.
+    30프레임 중 15장 선택 → VLM 장면 설명 → LLM 위험 행동 감지 → JSON 반환.
+    """
+    folder = Path(req.dir_path)
+    if not folder.is_dir():
+        raise HTTPException(
+            status_code=400, detail=f"폴더가 존재하지 않습니다: {req.dir_path}"
+        )
+
+    all_frames = collect_frames(folder)
+    if len(all_frames) < NUM_FRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"프레임이 {NUM_FRAMES}장 미만입니다 "
+                f"(발견: {len(all_frames)}장): {req.dir_path}"
+            ),
+        )
+
+    frames = select_frames(all_frames, NUM_FRAMES)
+    request_id = str(uuid.uuid4())[:8]
+    cfg = cfg_module.get()
+
+    log.info(
+        "analyze 시작 | req=%s | 폴더=%s | 전체=%d → 선택=%d",
+        request_id, req.dir_path, len(all_frames), len(frames),
+    )
+    t0 = time.perf_counter()
+
+    vlm_output = await run_inference(
+        frames, ANALYZE_VLM_PROMPT, ANALYZE_VLM_MAX_TOKENS, cfg.TEMPERATURE,
+    )
+    log.info("analyze VLM 완료 | req=%s | 설명길이=%d", request_id, len(vlm_output))
+
+    llm_prompt = ANALYZE_LLM_PROMPT_TEMPLATE.format(vlm_output=vlm_output)
+    llm_output = await run_llm_inference(
+        llm_prompt, ANALYZE_LLM_MAX_TOKENS, cfg.TEMPERATURE,
+    )
+    log.info("analyze LLM 완료 | req=%s | 응답=%s", request_id, llm_output.strip())
+
+    elapsed = time.perf_counter() - t0
+    result = _parse_llm_json(llm_output)
+
+    return AnalyzeResponse(
+        request_id=request_id,
+        action=result.get("action", ""),
+        tts_message=result.get("tts_message", ""),
+        vlm_description=vlm_output,
+        elapsed_sec=round(elapsed, 3),
+    )
 
 
 @app.get("/status", response_model=StatusResponse)
