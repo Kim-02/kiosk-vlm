@@ -32,12 +32,14 @@ FRAME_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
 ANALYZE_SYSTEM_PROMPT = (
     "You are a vision-language model for CCTV safety monitoring. Answer in Korean."
 )
-ANALYZE_VLM_PROMPT = (
+ANALYZE_VLM_PROMPT_BASE = (
     "다음 15장의 CCTV 프레임은 시간 순서대로 촬영된 공장 작업 현장 연속 장면이다. "
     "각 프레임을 개별로 보지 말고 전체 흐름을 하나의 장면으로 분석하라. "
     "장면에 보이는 환경, 사람, 장비, 물체를 묘사하고 "
     "사람이 어떤 행동을 하고 있는지 구체적으로 서술하라."
 )
+ANALYZE_VLM_FOCUS_PREFIX = " 특히 다음 항목에 주의하여 관찰하라: "
+
 ANALYZE_VLM_MAX_TOKENS = 256
 ANALYZE_LLM_MAX_TOKENS = 200
 ANALYZE_TEMPERATURE = 0.2
@@ -47,15 +49,19 @@ ANALYZE_TOP_K = 50
 ANALYZE_LLM_PROMPT_TEMPLATE = (
     "현장 설명:\n{vlm_output}\n\n"
     "위 설명에서 아래 위험 행동을 감지하라.\n"
-    "- hat_action: 안전모 미착용 또는 벗는 행동\n"
-    "- touch_action: 스피커를 만지는 행동\n"
-    "- dangerInOut_action: 금지 구역 출입\n"
-    "- ladder_action: 사다리를 올라가거나 단독 사다리 작업\n\n"
+    "{detect_items}\n\n"
     "JSON만 출력하라.\n"
     '{{"action":"감지키를_쉼표구분","tts_message":"경고문"}}\n'
     "action: 감지된 키만 나열. 없으면 빈 문자열.\n"
     "tts_message: 위험 사유와 함께 행동을 중단하십시오로 끝나는 문장. 없으면 빈 문자열."
 )
+
+DEFAULT_DETECT_ACTIONS: list[dict] = [
+    {"key": "hat_action", "label": "안전모 미착용 또는 벗는 행동"},
+    {"key": "touch_action", "label": "스피커를 만지는 행동"},
+    {"key": "dangerInOut_action", "label": "금지 구역 출입"},
+    {"key": "ladder_action", "label": "사다리를 올라가거나 단독 사다리 작업"},
+]
 
 DEBUG_DUMP_DIR = Path("/tmp")
 
@@ -191,8 +197,15 @@ class ConfigUpdateResponse(BaseModel):
     message: str
 
 
+class DetectAction(BaseModel):
+    key: str
+    label: str
+
+
 class AnalyzeRequest(BaseModel):
     dir_path: str
+    focus: Optional[str] = None
+    detect_actions: Optional[list[DetectAction]] = None
 
 
 class AnalyzeResponse(BaseModel):
@@ -527,21 +540,32 @@ async def analyze(req: AnalyzeRequest):
 
     frames = select_frames(all_frames, NUM_FRAMES)
     request_id = str(uuid.uuid4())[:8]
-    cfg = cfg_module.get()
 
     for fp in frames:
         if not fp.exists():
             log.error("프레임 파일 없음: %s", fp)
             raise HTTPException(status_code=400, detail=f"프레임 파일 없음: {fp}")
 
+    vlm_prompt = ANALYZE_VLM_PROMPT_BASE
+    if req.focus:
+        vlm_prompt += ANALYZE_VLM_FOCUS_PREFIX + req.focus
+
+    actions = (
+        [a.model_dump() for a in req.detect_actions]
+        if req.detect_actions
+        else DEFAULT_DETECT_ACTIONS
+    )
+    detect_items = "\n".join(f'- {a["key"]}: {a["label"]}' for a in actions)
+
     log.info(
-        "analyze 시작 | req=%s | 폴더=%s | 전체=%d → 선택=%d",
+        "analyze 시작 | req=%s | 폴더=%s | 전체=%d → 선택=%d | focus=%s | actions=%d개",
         request_id, req.dir_path, len(all_frames), len(frames),
+        req.focus or "(없음)", len(actions),
     )
     t0 = time.perf_counter()
 
     vlm_output = await run_inference(
-        frames, ANALYZE_VLM_PROMPT, ANALYZE_VLM_MAX_TOKENS,
+        frames, vlm_prompt, ANALYZE_VLM_MAX_TOKENS,
         ANALYZE_TEMPERATURE,
         system_prompt=ANALYZE_SYSTEM_PROMPT,
         top_p=ANALYZE_TOP_P,
@@ -549,7 +573,9 @@ async def analyze(req: AnalyzeRequest):
     )
     log.info("analyze VLM 완료 | req=%s | 설명길이=%d", request_id, len(vlm_output))
 
-    llm_prompt = ANALYZE_LLM_PROMPT_TEMPLATE.format(vlm_output=vlm_output)
+    llm_prompt = ANALYZE_LLM_PROMPT_TEMPLATE.format(
+        vlm_output=vlm_output, detect_items=detect_items,
+    )
     llm_output = await run_llm_inference(
         llm_prompt, ANALYZE_LLM_MAX_TOKENS,
         ANALYZE_TEMPERATURE,
@@ -659,10 +685,15 @@ async def debug_analyze_raw(req: AnalyzeRequest):
         )
 
     frames = select_frames(all_frames, NUM_FRAMES)
+
+    vlm_prompt = ANALYZE_VLM_PROMPT_BASE
+    if req.focus:
+        vlm_prompt += ANALYZE_VLM_FOCUS_PREFIX + req.focus
+
     t0 = time.perf_counter()
 
     vlm_output = await run_inference(
-        frames, ANALYZE_VLM_PROMPT, ANALYZE_VLM_MAX_TOKENS,
+        frames, vlm_prompt, ANALYZE_VLM_MAX_TOKENS,
         ANALYZE_TEMPERATURE,
         system_prompt=ANALYZE_SYSTEM_PROMPT,
         top_p=ANALYZE_TOP_P,
