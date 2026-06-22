@@ -1,10 +1,10 @@
 # DueGo VLM Server
 
-Qwen2.5-VL-7B 모델을 이용해 연속 프레임 시퀀스를 분석하는 범용 VLM 추론 서버.  
+Qwen2.5-VL-7B 모델을 이용해 연속 프레임 시퀀스를 분석하는 VLM+LLM 2단계 추론 서버.  
 **Jetson Thor** 에서 실행해야 합니다. TensorRT-Edge-LLM 엔진과 CUDA 환경이 Jetson Thor 기준으로 빌드되어 있습니다.
 
-> 이 서버는 raw text를 그대로 반환하는 범용 VLM 추론 서버입니다.  
-> 라벨 매핑, 위험도 판단, 후처리 등은 이 서버를 호출하는 상위 서버에서 담당합니다.
+> **`/analyze`** — dir 경로만 전달하면 VLM(장면 설명) → LLM(위험 행동 감지) 파이프라인을 자동 수행하고 JSON 결과를 반환합니다.  
+> **`/infer`** — 기존 범용 VLM 추론 엔드포인트. raw text를 그대로 반환합니다.
 
 ---
 
@@ -99,11 +99,12 @@ Uvicorn running on http://0.0.0.0:8000
 
 서버는 지정된 폴더의 파일을 직접 읽습니다. 요청 전에 아래 형식으로 이미지를 준비하세요.
 
-- **기본 파일명** (권장): `frame_01.jpg`, `frame_02.jpg`, ..., `frame_15.jpg`
-- **호환 파일명**: `frame1.jpg`, `frame2.jpg`, ..., `frame15.jpg`
+- **기본 파일명** (권장): `frame_01.jpg`, `frame_02.jpg`, ..., `frame_30.jpg`
+- **호환 파일명**: `frame1.jpg`, `frame2.jpg`, ..., `frame30.jpg`
 - **확장자**: `.jpg` / `.jpeg` / `.png` / `.bmp`
-- **필수 프레임 수**: 정확히 **15장** 이상 (미만이면 400 에러)
-- 15장 초과 시 번호 순으로 앞 15장만 사용합니다.
+- **필수 프레임 수**: 최소 **15장** 이상 (미만이면 400 에러)
+- `/infer` — 15장 초과 시 번호 순으로 앞 15장만 사용합니다.
+- `/analyze` — 30장 중 **균등 간격으로 15장**을 자동 선택합니다.
 - 15장은 하나의 행동 시퀀스로 처리되며, 프레임별 독립 분석이 아닙니다.
 
 ```
@@ -111,7 +112,7 @@ Uvicorn running on http://0.0.0.0:8000
 ├── frame_01.jpg
 ├── frame_02.jpg
 ├── ...
-└── frame_15.jpg
+└── frame_30.jpg    ← /analyze 시 15장 균등 선택
 ```
 
 > **주의**: 4K b1 엔진은 448×448 이미지 15장이 한계에 가깝습니다.  
@@ -121,9 +122,67 @@ Uvicorn running on http://0.0.0.0:8000
 
 ## API 목록
 
+### POST `http://localhost:8000/analyze`
+
+dir 경로만 전달하면 **VLM → LLM 2단계 파이프라인**을 자동 수행합니다.
+
+1. 폴더에서 30프레임 중 **15장을 균등 간격으로 선택**
+2. **VLM** — 선택된 15장으로 장면/행동을 자세히 설명
+3. **LLM** — VLM 설명에서 4가지 위험 행동을 감지하고 JSON 반환
+
+**감지 대상 행동**
+
+| 키 | 설명 |
+|----|------|
+| `hat_action` | 안전모를 착용하지 않았거나 벗는 행동 |
+| `touch_action` | 스피커를 만지는 행동 |
+| `dangerInOut_action` | 금지 구역에 출입하는 행동 |
+| `ladder_action` | 사다리를 올라가거나 단독 사다리 작업 |
+
+**Request Body**
+
+| 필드 | 타입 | 필수 | 설명 |
+|------|------|:----:|------|
+| `dir_path` | string | ✅ | 프레임 이미지가 있는 폴더의 절대 경로 |
+
+```json
+{
+  "dir_path": "/home/ds/Desktop/vlm_test/frames_448_30"
+}
+```
+
+**Response**
+
+```json
+{
+  "request_id": "a1b2c3d4",
+  "action": "hat_action,ladder_action",
+  "tts_message": "안전모를 착용하지 않은 상태에서 단독 사다리 작업을 하고 있어 위험합니다. 안전모를 착용하고 사다리 작업을 중단하십시오",
+  "vlm_description": "VLM이 생성한 장면 설명 텍스트",
+  "elapsed_sec": 3.456
+}
+```
+
+| 필드 | 설명 |
+|------|------|
+| `action` | 감지된 위험 행동 키를 쉼표로 구분. 없으면 빈 문자열 |
+| `tts_message` | 감지된 행동에 대한 TTS 경고 메시지. 없으면 빈 문자열 |
+| `vlm_description` | VLM 단계에서 생성된 장면 설명 원문 |
+| `elapsed_sec` | VLM+LLM 전체 소요 시간(초) |
+
+**curl 예시**
+
+```bash
+curl -X POST "http://localhost:8000/analyze" \
+  -H "Content-Type: application/json" \
+  -d '{"dir_path": "/home/ds/Desktop/vlm_test/frames_448_30"}'
+```
+
+---
+
 ### POST `http://localhost:8000/infer`
 
-15장의 연속 프레임을 하나의 시퀀스로 입력해 모델이 생성한 텍스트를 반환합니다.
+15장의 연속 프레임을 하나의 시퀀스로 입력해 모델이 생성한 텍스트를 반환합니다. (범용 VLM 추론)
 
 **Request Body**
 
