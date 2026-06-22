@@ -28,17 +28,25 @@ log = logging.getLogger(__name__)
 NUM_FRAMES = 15
 FRAME_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
 
-# ── analyze 엔드포인트용 정적 프롬프트 ────────────────────────────────────────
+# ── analyze 엔드포인트용 정적 프롬프트 / 샘플링 파라미터 ────────────────────────
+ANALYZE_SYSTEM_PROMPT = (
+    "You are a vision-language model for CCTV safety monitoring. Answer in Korean."
+)
 ANALYZE_VLM_PROMPT = (
-    "이 연속 프레임은 공장 작업 현장 CCTV 영상이다. 아래 항목을 빠짐없이 서술하라.\n"
+    "다음 15장의 CCTV 프레임은 시간 순서대로 촬영된 공장 작업 현장 연속 장면이다. "
+    "전체 흐름을 기준으로 아래 항목을 빠짐없이 서술하라.\n"
     "1. 사람 수와 각 사람의 위치\n"
     "2. 안전모 착용 여부 (쓰고 있는지, 벗고 있는지, 벗는 동작인지)\n"
     "3. 손으로 만지고 있는 장비나 물체 (스피커, 배선, 버튼 등)\n"
     "4. 출입 금지 구역 표시(바닥 선, 표지판, 펜스)와 그 안에 사람이 있는지\n"
-    "5. 사다리 유무와 사다리 위에 올라간 사람, 아래에서 잡아주는 사람 유무"
+    "5. 사다리 유무와 사다리 위에 올라간 사람, 아래에서 잡아주는 사람 유무\n"
+    "위험 상황이 있으면 마지막에 경고 문구도 한 문장으로 작성해라."
 )
-ANALYZE_VLM_MAX_TOKENS = 300
+ANALYZE_VLM_MAX_TOKENS = 256
 ANALYZE_LLM_MAX_TOKENS = 200
+ANALYZE_TEMPERATURE = 0.2
+ANALYZE_TOP_P = 0.9
+ANALYZE_TOP_K = 50
 
 ANALYZE_LLM_PROMPT_TEMPLATE = (
     "현장 설명:\n{vlm_output}\n\n"
@@ -52,6 +60,8 @@ ANALYZE_LLM_PROMPT_TEMPLATE = (
     "action: 감지된 키만 나열. 없으면 빈 문자열.\n"
     "tts_message: 위험 사유와 함께 행동을 중단하십시오로 끝나는 문장. 없으면 빈 문자열."
 )
+
+DEBUG_DUMP_DIR = Path("/tmp")
 
 # ── 런타임 (startup 때 초기화) ─────────────────────────────────────────────────
 _runtime: Any = None
@@ -225,25 +235,96 @@ def select_frames(frames: list[Path], target: int = NUM_FRAMES) -> list[Path]:
     return [frames[i] for i in indices]
 
 
-def _sync_infer(
-    frame_paths: list[Path],
-    prompt: str,
+def _build_generation_kwargs(
+    batch_messages: list,
     max_tokens: int,
     temperature: float,
-) -> str:
-    """15프레임을 하나의 user message에 순서대로 넣고 추론. 블로킹 — to_thread로 호출."""
-    contents = [_edgellm.MessageContent("image", str(p)) for p in frame_paths]
-    contents.append(_edgellm.MessageContent("text", prompt))
-
-    request = _edgellm.create_generation_request(
-        batch_messages=[[_edgellm.Message("user", contents)]],
+    top_p: Optional[float] = None,
+    top_k: Optional[int] = None,
+) -> dict:
+    kwargs = dict(
+        batch_messages=batch_messages,
         temperature=temperature,
         max_generate_length=max_tokens,
         apply_chat_template=True,
         add_generation_prompt=True,
     )
-    response = _runtime.handle_request(request)
-    return response.output_texts[0] if response.output_texts else ""
+    if top_p is not None:
+        kwargs["top_p"] = top_p
+    if top_k is not None:
+        kwargs["top_k"] = top_k
+    return kwargs
+
+
+def _dump_debug_json(
+    tag: str,
+    frame_paths: list[Path],
+    prompt: str,
+    system_prompt: Optional[str],
+    max_tokens: int,
+    temperature: float,
+    top_p: Optional[float],
+    top_k: Optional[int],
+) -> None:
+    """직접 실행 JSON과 비교할 수 있도록 /tmp 에 요청 구조를 덤프."""
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    content = [{"type": "image", "image": str(p)} for p in frame_paths]
+    content.append({"type": "text", "text": prompt})
+    messages.append({"role": "user", "content": content})
+
+    dump = {
+        "batch_size": 1,
+        "temperature": temperature,
+        "top_p": top_p,
+        "top_k": top_k,
+        "max_generate_length": max_tokens,
+        "requests": [{"messages": messages}],
+    }
+    out = DEBUG_DUMP_DIR / f"api_last_{tag}.json"
+    out.write_text(json.dumps(dump, indent=2, ensure_ascii=False))
+    log.info("디버그 JSON 저장: %s", out)
+
+
+def _sync_infer(
+    frame_paths: list[Path],
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    system_prompt: Optional[str] = None,
+    top_p: Optional[float] = None,
+    top_k: Optional[int] = None,
+) -> str:
+    """15프레임을 하나의 user message에 순서대로 넣고 추론. 블로킹 — to_thread로 호출."""
+    _dump_debug_json(
+        "vlm", frame_paths, prompt, system_prompt,
+        max_tokens, temperature, top_p, top_k,
+    )
+
+    messages: list = []
+    if system_prompt:
+        messages.append(
+            _edgellm.Message("system", [_edgellm.MessageContent("text", system_prompt)])
+        )
+
+    contents = [_edgellm.MessageContent("image", str(p)) for p in frame_paths]
+    contents.append(_edgellm.MessageContent("text", prompt))
+    messages.append(_edgellm.Message("user", contents))
+
+    kwargs = _build_generation_kwargs(
+        [messages], max_tokens, temperature, top_p, top_k,
+    )
+
+    log.info(
+        "VLM 추론 시작 | 이미지=%d장 | system=%s | temp=%.1f | top_p=%s | top_k=%s | max_tokens=%d",
+        len(frame_paths), bool(system_prompt), temperature,
+        top_p, top_k, max_tokens,
+    )
+    response = _runtime.handle_request(_edgellm.create_generation_request(**kwargs))
+    raw = response.output_texts[0] if response.output_texts else ""
+    log.info("VLM 추론 완료 | 출력길이=%d | 원문=%s", len(raw), raw[:200])
+    return raw
 
 
 async def run_inference(
@@ -251,33 +332,59 @@ async def run_inference(
     prompt: str,
     max_tokens: int,
     temperature: float,
+    system_prompt: Optional[str] = None,
+    top_p: Optional[float] = None,
+    top_k: Optional[int] = None,
 ) -> str:
     async with _gpu_sem:
         return await asyncio.to_thread(
-            _sync_infer, frame_paths, prompt, max_tokens, temperature
+            _sync_infer, frame_paths, prompt, max_tokens, temperature,
+            system_prompt, top_p, top_k,
         )
 
 
-def _sync_llm_infer(prompt: str, max_tokens: int, temperature: float) -> str:
+def _sync_llm_infer(
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    system_prompt: Optional[str] = None,
+    top_p: Optional[float] = None,
+    top_k: Optional[int] = None,
+) -> str:
     """텍스트만 입력하여 추론. 블로킹 — to_thread로 호출."""
+    messages: list = []
+    if system_prompt:
+        messages.append(
+            _edgellm.Message("system", [_edgellm.MessageContent("text", system_prompt)])
+        )
+
     contents = [_edgellm.MessageContent("text", prompt)]
-    request = _edgellm.create_generation_request(
-        batch_messages=[[_edgellm.Message("user", contents)]],
-        temperature=temperature,
-        max_generate_length=max_tokens,
-        apply_chat_template=True,
-        add_generation_prompt=True,
+    messages.append(_edgellm.Message("user", contents))
+
+    kwargs = _build_generation_kwargs(
+        [messages], max_tokens, temperature, top_p, top_k,
     )
-    response = _runtime.handle_request(request)
-    return response.output_texts[0] if response.output_texts else ""
+
+    log.info("LLM 추론 시작 | system=%s | temp=%.1f | max_tokens=%d",
+             bool(system_prompt), temperature, max_tokens)
+    response = _runtime.handle_request(_edgellm.create_generation_request(**kwargs))
+    raw = response.output_texts[0] if response.output_texts else ""
+    log.info("LLM 추론 완료 | 출력길이=%d | 원문=%s", len(raw), raw[:300])
+    return raw
 
 
 async def run_llm_inference(
-    prompt: str, max_tokens: int, temperature: float,
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    system_prompt: Optional[str] = None,
+    top_p: Optional[float] = None,
+    top_k: Optional[int] = None,
 ) -> str:
     async with _gpu_sem:
         return await asyncio.to_thread(
-            _sync_llm_infer, prompt, max_tokens, temperature
+            _sync_llm_infer, prompt, max_tokens, temperature,
+            system_prompt, top_p, top_k,
         )
 
 
@@ -426,6 +533,11 @@ async def analyze(req: AnalyzeRequest):
     request_id = str(uuid.uuid4())[:8]
     cfg = cfg_module.get()
 
+    for fp in frames:
+        if not fp.exists():
+            log.error("프레임 파일 없음: %s", fp)
+            raise HTTPException(status_code=400, detail=f"프레임 파일 없음: {fp}")
+
     log.info(
         "analyze 시작 | req=%s | 폴더=%s | 전체=%d → 선택=%d",
         request_id, req.dir_path, len(all_frames), len(frames),
@@ -433,13 +545,21 @@ async def analyze(req: AnalyzeRequest):
     t0 = time.perf_counter()
 
     vlm_output = await run_inference(
-        frames, ANALYZE_VLM_PROMPT, ANALYZE_VLM_MAX_TOKENS, cfg.TEMPERATURE,
+        frames, ANALYZE_VLM_PROMPT, ANALYZE_VLM_MAX_TOKENS,
+        ANALYZE_TEMPERATURE,
+        system_prompt=ANALYZE_SYSTEM_PROMPT,
+        top_p=ANALYZE_TOP_P,
+        top_k=ANALYZE_TOP_K,
     )
     log.info("analyze VLM 완료 | req=%s | 설명길이=%d", request_id, len(vlm_output))
 
     llm_prompt = ANALYZE_LLM_PROMPT_TEMPLATE.format(vlm_output=vlm_output)
     llm_output = await run_llm_inference(
-        llm_prompt, ANALYZE_LLM_MAX_TOKENS, cfg.TEMPERATURE,
+        llm_prompt, ANALYZE_LLM_MAX_TOKENS,
+        ANALYZE_TEMPERATURE,
+        system_prompt=ANALYZE_SYSTEM_PROMPT,
+        top_p=ANALYZE_TOP_P,
+        top_k=ANALYZE_TOP_K,
     )
     log.info("analyze LLM 완료 | req=%s | 응답=%s", request_id, llm_output.strip())
 
@@ -526,6 +646,41 @@ async def config_update(update: ConfigUpdate):
         restart_required=restart_required,
         message=" | ".join(messages),
     )
+
+
+@app.post("/debug/analyze_raw")
+async def debug_analyze_raw(req: AnalyzeRequest):
+    """VLM raw output만 반환. 직접 실행 결과와 비교용."""
+    folder = Path(req.dir_path)
+    if not folder.is_dir():
+        raise HTTPException(status_code=400, detail=f"폴더 없음: {req.dir_path}")
+
+    all_frames = collect_frames(folder)
+    if len(all_frames) < NUM_FRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"프레임 {NUM_FRAMES}장 미만 (발견: {len(all_frames)}장)",
+        )
+
+    frames = select_frames(all_frames, NUM_FRAMES)
+    t0 = time.perf_counter()
+
+    vlm_output = await run_inference(
+        frames, ANALYZE_VLM_PROMPT, ANALYZE_VLM_MAX_TOKENS,
+        ANALYZE_TEMPERATURE,
+        system_prompt=ANALYZE_SYSTEM_PROMPT,
+        top_p=ANALYZE_TOP_P,
+        top_k=ANALYZE_TOP_K,
+    )
+    elapsed = time.perf_counter() - t0
+
+    return {
+        "vlm_raw_output": vlm_output,
+        "output_length": len(vlm_output),
+        "frames_used": [str(f) for f in frames],
+        "debug_json_path": str(DEBUG_DUMP_DIR / "api_last_vlm.json"),
+        "elapsed_sec": round(elapsed, 3),
+    }
 
 
 @app.get("/health")
