@@ -1,0 +1,37 @@
+# Server runtime dependencies
+# Generated from Jetson Thor .qwen25-vl-7b-venv (Python 3.12.3)
+
+# Core
+fastapi==0.115.6
+uvicorn==0.34.0
+pydantic==2.10.4
+pydantic_core==2.27.2
+
+# uvicorn extras (uvicorn[standard])
+uvloop==0.22.1
+httptools==0.8.0
+websockets==16.0
+watchfiles==1.2.0
+python-dotenv==1.2.2
+
+# fastapi / starlette deps
+starlette==0.41.3
+anyio==4.13.0
+click==8.4.1
+h11==0.16.0
+idna==3.18
+annotated-types==0.7.0
+typing_extensions==4.15.0
+
+# Image handling (optional, available in venv)
+numpy==1.26.4
+pillow==12.1.1
+opencv-contrib-python-headless==4.10.0.84
+
+# Templating (uvicorn/starlette dep)
+Jinja2==3.1.5
+MarkupSafe==3.0.3
+PyYAML==6.0.3
+
+# Build-time only (not needed at runtime)
+# pybind11==3.0.4
