@@ -30,14 +30,21 @@ FRAME_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
 _FRAME_RE = re.compile(r"^frame_(\d+)$|^frame(\d+)$")
 
 # ── 프롬프트 / 샘플링 ────────────────────────────────────────────────────────
-SYSTEM_PROMPT = "You are a factory safety inspector. Only report what you actually see. Answer in JSON."
+SYSTEM_PROMPT = "You are a factory safety inspector analyzing CCTV footage. Only describe what you actually see. Answer in Korean."
 
-MAX_TOKENS = 128
+MAX_TOKENS = 256
 TEMPERATURE = 0.2
 TOP_P = 0.9
 TOP_K = 50
 
-DETECT_PROMPT = "Describe what the people in these frames are doing. Answer in Korean."
+DETECT_PROMPT = (
+    "이 연속 프레임은 작업 현장 CCTV 영상이다. 안전 관점에서 현재 상황을 자세히 분석하라.\n"
+    "- 사람이 몇 명 보이는지\n"
+    "- 각 사람이 무엇을 하고 있는지\n"
+    "- 헬멧, 안전장비 착용 여부\n"
+    "- 사다리, 위험 구역, 장비 접촉 등 위험 요소가 있는지\n"
+    "보이는 것만 서술하라. 추측하지 마라."
+)
 
 # ── 런타임 ────────────────────────────────────────────────────────────────────
 _runtime: Any = None
