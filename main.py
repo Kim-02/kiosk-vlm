@@ -319,7 +319,7 @@ async def v1_debug(req: DebugRequest):
         )
 
     frames = select_frames(all_frames, NUM_FRAMES)
-    prompt = "공장 작업 현장 CCTV 연속 프레임이다. 장면에 보이는 환경, 사람, 장비, 행동을 한국어로 서술하라."
+    prompt = "이 화면을 두 줄로 간단하게 설명해라"
 
     t0 = time.perf_counter()
     async with _lock:
