@@ -391,6 +391,49 @@ async def v1_debug(req: DebugRequest):
     }
 
 
+@app.get("/v1/debug/pybind")
+async def v1_debug_pybind():
+    """pybind 모듈의 클래스/메서드/속성 전체 목록을 반환."""
+    import inspect
+    result = {}
+
+    for name in sorted(dir(_edgellm)):
+        if name.startswith("_"):
+            continue
+        obj = getattr(_edgellm, name)
+        info = {"type": type(obj).__name__}
+        if inspect.isclass(obj):
+            info["methods"] = [m for m in dir(obj) if not m.startswith("_")]
+            try:
+                sig = inspect.signature(obj.__init__)
+                info["init_params"] = str(sig)
+            except (ValueError, TypeError):
+                info["init_params"] = "확인 불가"
+        result[name] = info
+
+    runtime_info = {}
+    for name in sorted(dir(_runtime)):
+        if name.startswith("_"):
+            continue
+        obj = getattr(_runtime, name)
+        runtime_info[name] = type(obj).__name__
+
+    mc_info = {}
+    try:
+        mc = _edgellm.MessageContent("text", "test")
+        for name in sorted(dir(mc)):
+            if not name.startswith("_"):
+                mc_info[name] = type(getattr(mc, name)).__name__
+    except Exception as e:
+        mc_info["error"] = str(e)
+
+    return {
+        "module_members": result,
+        "runtime_members": runtime_info,
+        "message_content_members": mc_info,
+    }
+
+
 @app.get("/v1/debug/resize")
 async def v1_debug_resize(dir_path: str):
     """GET으로 접근 — 브라우저에서 리사이즈된 15장을 한눈에 확인."""
