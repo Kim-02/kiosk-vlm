@@ -102,6 +102,7 @@ class AnalyzeResponse(BaseModel):
     request_id: str
     action: str
     tts_message: str
+    prompt: str
     elapsed_sec: float
 
 
@@ -230,6 +231,7 @@ async def analyze(req: AnalyzeRequest):
         request_id=request_id,
         action=result.get("action", ""),
         tts_message=result.get("tts_message", ""),
+        prompt=prompt,
         elapsed_sec=round(elapsed, 3),
     )
 
