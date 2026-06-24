@@ -39,20 +39,19 @@ TOP_K = 50
 
 DETECT_PROMPT = (
     "Look at these factory CCTV frames.\n"
-    "First: is there any person visible? If NO person is visible, output:\n"
-    '{"action":"no_person","tts_message":""}\n\n'
-    "If person IS visible, check ONLY these 4 items:\n"
-    "- hat_action: someone NOT wearing a helmet or removing it\n"
-    "- touch_action: someone touching a speaker\n"
-    "- dangerInOut_action: someone crossing a taped restricted zone\n"
-    "- ladder_action: someone climbing a ladder alone\n\n"
+    "Count the total number of people visible. If 0, output:\n"
+    '{"person_count":0,"hat_action":0,"touch_action":0,"dangerInOut_action":0,"ladder_action":0}\n\n'
+    "If people ARE visible, count how many people are doing each:\n"
+    "- hat_action: NOT wearing a helmet or removing it\n"
+    "- touch_action: touching a speaker\n"
+    "- dangerInOut_action: crossing a taped restricted zone\n"
+    "- ladder_action: climbing a ladder alone\n\n"
     "Rules:\n"
-    "- If you do NOT clearly see the action, do NOT include the key.\n"
-    "- Most frames are normal. Empty action is the expected default.\n"
+    "- Count only what you clearly see. If unsure, count as 0.\n"
+    "- Most frames are normal. All 0 is the expected default.\n"
     "- Output ONLY one JSON line. No other text.\n\n"
-    '{"action":"","tts_message":""}\n'
-    '{"action":"hat_action","tts_message":"헬멧을 착용하십시오"}\n'
-    '{"action":"hat_action,dangerInOut_action","tts_message":"헬멧을 착용하고, 위험 구역에서 벗어나십시오"}'
+    '{"person_count":3,"hat_action":0,"touch_action":0,"dangerInOut_action":0,"ladder_action":0}\n'
+    '{"person_count":2,"hat_action":1,"touch_action":0,"dangerInOut_action":1,"ladder_action":0}'
 )
 
 # ── 런타임 ────────────────────────────────────────────────────────────────────
@@ -100,7 +99,11 @@ class AnalyzeRequest(BaseModel):
 
 class AnalyzeResponse(BaseModel):
     request_id: str
-    action: str
+    person_count: int
+    hat_action: int
+    touch_action: int
+    dangerInOut_action: int
+    ladder_action: int
     tts_message: str
     elapsed_sec: float
 
@@ -183,7 +186,7 @@ def _run_vlm(
     return raw
 
 
-VALID_ACTIONS = {"hat_action", "touch_action", "dangerInOut_action", "ladder_action"}
+ACTION_KEYS = ["hat_action", "touch_action", "dangerInOut_action", "ladder_action"]
 
 ACTION_TTS = {
     "hat_action": "헬멧을 착용하십시오",
@@ -192,33 +195,42 @@ ACTION_TTS = {
     "ladder_action": "사다리에서 내려오십시오. 혼자 사다리 작업은 금지입니다",
 }
 
+EMPTY_RESULT = {
+    "person_count": 0,
+    "hat_action": 0, "touch_action": 0, "dangerInOut_action": 0, "ladder_action": 0,
+    "tts_message": "",
+}
+
 
 def _parse_and_validate(text: str) -> dict:
     text = text.strip()
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1:
-        return {"action": "", "tts_message": ""}
+        return EMPTY_RESULT.copy()
 
     try:
         data = json.loads(text[start : end + 1])
     except json.JSONDecodeError:
-        return {"action": "", "tts_message": ""}
+        return EMPTY_RESULT.copy()
 
-    raw_action = data.get("action", "")
-    if not raw_action:
-        return {"action": "", "tts_message": ""}
+    person_count = max(int(data.get("person_count", 0)), 0)
 
-    if raw_action.strip() == "no_person":
-        return {"action": "no_person", "tts_message": ""}
+    counts = {}
+    for k in ACTION_KEYS:
+        v = data.get(k, 0)
+        counts[k] = max(int(v), 0) if isinstance(v, (int, float, str)) and str(v).isdigit() else 0
 
-    valid_keys = [k.strip() for k in raw_action.split(",") if k.strip() in VALID_ACTIONS]
+    tts_parts = []
+    for k in ACTION_KEYS:
+        if counts[k] > 0:
+            tts_parts.append(f"{ACTION_TTS[k]} ({counts[k]}명)")
 
-    if not valid_keys:
-        return {"action": "", "tts_message": ""}
-
-    tts = ", ".join(ACTION_TTS[k] for k in valid_keys)
-    return {"action": ",".join(valid_keys), "tts_message": tts}
+    return {
+        "person_count": person_count,
+        **counts,
+        "tts_message": ", ".join(tts_parts),
+    }
 
 
 # ── 엔드포인트 ───────────────────────────────────────────────────────────────
@@ -252,7 +264,11 @@ async def analyze(req: AnalyzeRequest):
     result = _parse_and_validate(raw)
     return AnalyzeResponse(
         request_id=request_id,
-        action=result["action"],
+        person_count=result["person_count"],
+        hat_action=result["hat_action"],
+        touch_action=result["touch_action"],
+        dangerInOut_action=result["dangerInOut_action"],
+        ladder_action=result["ladder_action"],
         tts_message=result["tts_message"],
         elapsed_sec=round(elapsed, 3),
     )
