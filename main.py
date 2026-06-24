@@ -318,24 +318,28 @@ class DebugRequest(BaseModel):
 
 @app.post("/v1/debug")
 async def v1_debug(req: DebugRequest):
-    """load_image_from_path + image_buffers 방식 테스트."""
+    """15장 로드 + image_buffers + 순수 설명 요청."""
     folder = Path(req.dir_path)
     if not folder.is_dir():
         raise HTTPException(status_code=400, detail=f"폴더 없음: {req.dir_path}")
 
     all_frames = collect_frames(folder)
-    if not all_frames:
-        raise HTTPException(status_code=400, detail="프레임 없음")
+    if len(all_frames) < NUM_FRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"프레임 {NUM_FRAMES}장 미만 (발견: {len(all_frames)}장)",
+        )
 
-    test_path = str(all_frames[0])
+    frames = select_frames(all_frames, NUM_FRAMES)
 
-    img_data = _edgellm.load_image_from_path(test_path)
-    log.info("이미지 로드: %s → %dx%d ch=%d", test_path, img_data.width, img_data.height, img_data.channels)
+    image_buffers = []
+    for p in frames:
+        img = _edgellm.load_image_from_path(str(p))
+        image_buffers.append(img)
+        log.info("이미지 로드: %s → %dx%d", p.name, img.width, img.height)
 
-    contents = [
-        _edgellm.MessageContent("image", test_path),
-        _edgellm.MessageContent("text", "Describe what you see."),
-    ]
+    contents = [_edgellm.MessageContent("image", str(p)) for p in frames]
+    contents.append(_edgellm.MessageContent("text", "Describe what you see."))
 
     gen_req = _edgellm.create_generation_request(
         batch_messages=[[_edgellm.Message("user", contents)]],
@@ -346,8 +350,7 @@ async def v1_debug(req: DebugRequest):
         apply_chat_template=True,
         add_generation_prompt=True,
     )
-
-    gen_req.requests[0].image_buffers = [img_data]
+    gen_req.requests[0].image_buffers = image_buffers
 
     t0 = time.perf_counter()
     async with _lock:
@@ -358,8 +361,8 @@ async def v1_debug(req: DebugRequest):
 
     return {
         "description": raw,
-        "test_image": test_path,
-        "image_info": f"{img_data.width}x{img_data.height} ch={img_data.channels}",
+        "frames_used": [str(f) for f in frames],
+        "image_count": len(image_buffers),
         "elapsed_sec": round(elapsed, 3),
     }
 
