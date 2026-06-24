@@ -300,6 +300,39 @@ async def debug_analyze_raw(req: AnalyzeRequest):
     }
 
 
+class DebugRequest(BaseModel):
+    dir_path: str
+
+
+@app.post("/v1/debug")
+async def v1_debug(req: DebugRequest):
+    """VLM에 장면 설명만 시킨다. 프레임에서 뭘 보고 있는지 확인용."""
+    folder = Path(req.dir_path)
+    if not folder.is_dir():
+        raise HTTPException(status_code=400, detail=f"폴더 없음: {req.dir_path}")
+
+    all_frames = collect_frames(folder)
+    if len(all_frames) < NUM_FRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"프레임 {NUM_FRAMES}장 미만 (발견: {len(all_frames)}장)",
+        )
+
+    frames = select_frames(all_frames, NUM_FRAMES)
+    prompt = "공장 작업 현장 CCTV 연속 프레임이다. 장면에 보이는 환경, 사람, 장비, 행동을 한국어로 서술하라."
+
+    t0 = time.perf_counter()
+    async with _lock:
+        raw = await asyncio.to_thread(_sync_infer, frames, prompt, 256)
+    elapsed = time.perf_counter() - t0
+
+    return {
+        "description": raw,
+        "frames_used": [str(f) for f in frames],
+        "elapsed_sec": round(elapsed, 3),
+    }
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
