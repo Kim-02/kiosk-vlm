@@ -357,14 +357,15 @@ async def v1_debug(req: DebugRequest):
         )
 
     frames = select_frames(all_frames, NUM_FRAMES)
+    resized = [_resize_frame(p) for p in frames]
 
     image_buffers = []
-    for p in frames:
-        img = _edgellm.load_image_from_path(str(p))
+    for rp in resized:
+        img = _edgellm.load_image_from_path(rp)
         image_buffers.append(img)
-        log.info("이미지 로드: %s → %dx%d", p.name, img.width, img.height)
+        log.info("이미지 로드: %s → %dx%d", Path(rp).name, img.width, img.height)
 
-    contents = [_edgellm.MessageContent("image", str(p)) for p in frames]
+    contents = [_edgellm.MessageContent("image", rp) for rp in resized]
     contents.append(_edgellm.MessageContent("text", "Describe what you see."))
 
     gen_req = _edgellm.create_generation_request(
