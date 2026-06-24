@@ -38,7 +38,7 @@ TOP_P = 0.9
 TOP_K = 50
 
 PROMPT_TEMPLATE = (
-    "공장 CCTV 프레임이다. 대부분은 정상이다. "
+    "공장 CCTV 프레임이다."
     "아래 행동이 확실히 보일 때만 해당 키를 출력하라. 안 보이면 빈 문자열로 둬라.\n"
     "{detect_items}\n"
     "JSON만 출력.\n"
