@@ -133,6 +133,14 @@ class AnalyzeResponse(BaseModel):
     elapsed_sec: float
 
 
+class FistResponse(BaseModel):
+    request_id: str
+    description: str
+    action: str
+    tts_message: str
+    elapsed_sec: float
+
+
 # ── 유틸 ─────────────────────────────────────────────────────────────────────
 def collect_frames(folder: Path) -> list[Path]:
     candidates: list[tuple[int, Path]] = []
@@ -271,10 +279,30 @@ async def analyze_tape(req: AnalyzeRequest):
     return await _analyze(req, PROMPT_TAPE, "analyze/tape")
 
 
-@app.post("/analyze/fist", response_model=AnalyzeResponse)
+@app.post("/analyze/fist", response_model=FistResponse)
 async def analyze_fist(req: AnalyzeRequest):
-    """주먹 쥔 사람 탐지 → hat_action"""
-    return await _analyze(req, PROMPT_FIST, "analyze/fist")
+    """주먹 쥔 사람 탐지 → 감지 시 action: hat_action"""
+    frames = _validate_and_select(req.dir_path)
+    request_id = str(uuid.uuid4())[:8]
+
+    log.info("analyze/fist 시작 | req=%s | 폴더=%s", request_id, req.dir_path)
+    t0 = time.perf_counter()
+
+    async with _lock:
+        raw = await asyncio.to_thread(_run_vlm, frames, PROMPT_FIST, MAX_TOKENS)
+
+    elapsed = time.perf_counter() - t0
+    desc = raw.strip()
+    log.info("analyze/fist 완료 | req=%s | %.2fs | 응답=%s", request_id, elapsed, desc[:200])
+
+    detected = "주먹" in desc
+    return FistResponse(
+        request_id=request_id,
+        description=desc,
+        action="hat_action" if detected else "",
+        tts_message="안전 이상이 발생되었습니다." if detected else "",
+        elapsed_sec=round(elapsed, 3),
+    )
 
 
 # ── 디버그 ───────────────────────────────────────────────────────────────────
