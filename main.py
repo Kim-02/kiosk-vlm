@@ -24,6 +24,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 NUM_FRAMES = 15
+FRAME_SIZE = 448
 FRAME_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
 _FRAME_RE = re.compile(r"^frame_(\d+)$|^frame(\d+)$")
 
@@ -128,11 +129,39 @@ def select_frames(frames: list[Path], target: int = NUM_FRAMES) -> list[Path]:
     return [frames[i] for i in indices]
 
 
+def _resize_frames(frame_paths: list[Path]) -> list[str]:
+    """448x448이 아닌 이미지를 리사이즈하여 임시 파일로 저장. 이미 맞으면 원본 경로 반환."""
+    import cv2
+    resized = []
+    tmp_dir = Path("/tmp/vlm_resized")
+    tmp_dir.mkdir(exist_ok=True)
+
+    for p in frame_paths:
+        img = cv2.imread(str(p))
+        if img is None:
+            log.warning("이미지 읽기 실패: %s", p)
+            resized.append(str(p))
+            continue
+
+        h, w = img.shape[:2]
+        if h == FRAME_SIZE and w == FRAME_SIZE:
+            resized.append(str(p))
+        else:
+            img = cv2.resize(img, (FRAME_SIZE, FRAME_SIZE), interpolation=cv2.INTER_AREA)
+            out = tmp_dir / p.name
+            cv2.imwrite(str(out), img)
+            resized.append(str(out))
+
+    return resized
+
+
 def _sync_infer(frame_paths: list[Path], prompt: str, max_tokens: int) -> str:
+    image_paths = _resize_frames(frame_paths)
+
     messages = [
         _edgellm.Message("system", [_edgellm.MessageContent("text", SYSTEM_PROMPT)]),
     ]
-    contents = [_edgellm.MessageContent("image", str(p)) for p in frame_paths]
+    contents = [_edgellm.MessageContent("image", p) for p in image_paths]
     contents.append(_edgellm.MessageContent("text", prompt))
     messages.append(_edgellm.Message("user", contents))
 
