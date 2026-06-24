@@ -25,7 +25,6 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 NUM_FRAMES = 15
-FRAME_SIZE = 448
 FRAME_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
 _FRAME_RE = re.compile(r"^frame_(\d+)$|^frame(\d+)$")
 
@@ -130,56 +129,23 @@ def select_frames(frames: list[Path], target: int = NUM_FRAMES) -> list[Path]:
     return [frames[i] for i in indices]
 
 
-def _resize_frames(frame_paths: list[Path]) -> list[str]:
-    """448x448이 아닌 이미지를 리사이즈하여 임시 파일로 저장. 비율 유지 + 검정 패딩."""
-    import cv2
-    import numpy as np
-    resized = []
-    tmp_dir = Path("/tmp/vlm_resized")
-    tmp_dir.mkdir(exist_ok=True)
-
-    for p in frame_paths:
-        img = cv2.imread(str(p))
-        if img is None:
-            log.warning("이미지 읽기 실패: %s", p)
-            resized.append(str(p))
-            continue
-
-        h, w = img.shape[:2]
-        if h == FRAME_SIZE and w == FRAME_SIZE:
-            resized.append(str(p))
-            continue
-
-        scale = min(FRAME_SIZE / w, FRAME_SIZE / h)
-        new_w, new_h = int(w * scale), int(h * scale)
-        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-        canvas = np.zeros((FRAME_SIZE, FRAME_SIZE, 3), dtype=np.uint8)
-        y_off = (FRAME_SIZE - new_h) // 2
-        x_off = (FRAME_SIZE - new_w) // 2
-        canvas[y_off:y_off + new_h, x_off:x_off + new_w] = img
-
-        out = tmp_dir / f"{p.stem}.jpg"
-        cv2.imwrite(str(out), canvas, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        resized.append(str(out))
-
-    return resized
-
-
 def _sync_infer(
     frame_paths: list[Path], prompt: str, max_tokens: int,
     system_prompt: str = SYSTEM_PROMPT,
 ) -> str:
-    image_paths = _resize_frames(frame_paths)
+    image_buffers = []
+    for p in frame_paths:
+        img = _edgellm.load_image_from_path(str(p))
+        image_buffers.append(img)
 
     messages = [
         _edgellm.Message("system", [_edgellm.MessageContent("text", system_prompt)]),
     ]
-    contents = [_edgellm.MessageContent("image", p) for p in image_paths]
+    contents = [_edgellm.MessageContent("image", str(p)) for p in frame_paths]
     contents.append(_edgellm.MessageContent("text", prompt))
     messages.append(_edgellm.Message("user", contents))
 
-    kwargs = dict(
+    gen_req = _edgellm.create_generation_request(
         batch_messages=[messages],
         temperature=TEMPERATURE,
         max_generate_length=max_tokens,
@@ -188,9 +154,10 @@ def _sync_infer(
         apply_chat_template=True,
         add_generation_prompt=True,
     )
+    gen_req.requests[0].image_buffers = image_buffers
 
     log.info("추론 시작 | 이미지=%d장 | max_tokens=%d", len(frame_paths), max_tokens)
-    response = _runtime.handle_request(_edgellm.create_generation_request(**kwargs))
+    response = _runtime.handle_request(gen_req)
     raw = response.output_texts[0] if response.output_texts else ""
     log.info("추론 완료 | 출력길이=%d | 원문=%s", len(raw), raw[:300])
     return raw
