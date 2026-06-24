@@ -166,37 +166,11 @@ def _resize_frames(frame_paths: list[Path]) -> list[str]:
     return resized
 
 
-def _show_debug_frames(image_paths: list[str]) -> None:
-    """리사이즈된 15장을 HTML로 만들어 브라우저에 2초간 표시."""
-    import base64, subprocess
-    imgs_html = ""
-    for p in image_paths:
-        with open(p, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode()
-        imgs_html += f'<img src="data:image/jpeg;base64,{b64}" style="width:140px;height:140px;margin:2px;">\n'
-
-    html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>VLM Debug Frames</title></head>
-<body style="background:#111;margin:10px;">
-<h3 style="color:#fff;">VLM 입력 프레임 ({len(image_paths)}장)</h3>
-<div style="display:flex;flex-wrap:wrap;">{imgs_html}</div>
-<script>setTimeout(()=>window.close(),2500);</script>
-</body></html>"""
-
-    html_path = Path("/tmp/vlm_debug_frames.html")
-    html_path.write_text(html)
-    try:
-        subprocess.Popen(["xdg-open", str(html_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        log.warning("브라우저 열기 실패: %s", html_path)
-
-
 def _sync_infer(
     frame_paths: list[Path], prompt: str, max_tokens: int,
     system_prompt: str = SYSTEM_PROMPT,
 ) -> str:
     image_paths = _resize_frames(frame_paths)
-    _show_debug_frames(image_paths)
 
     messages = [
         _edgellm.Message("system", [_edgellm.MessageContent("text", system_prompt)]),
@@ -407,12 +381,15 @@ async def v1_debug(req: DebugRequest):
     }
 
 
-@app.post("/v1/debug/resize")
-async def v1_debug_resize(req: DebugRequest):
-    """리사이즈된 이미지 목록 확인. /v1/debug/resize/image?path= 로 개별 이미지 확인."""
-    folder = Path(req.dir_path)
+@app.get("/v1/debug/resize")
+async def v1_debug_resize(dir_path: str):
+    """GET으로 접근 — 브라우저에서 리사이즈된 15장을 한눈에 확인."""
+    from fastapi.responses import HTMLResponse
+    import base64
+
+    folder = Path(dir_path)
     if not folder.is_dir():
-        raise HTTPException(status_code=400, detail=f"폴더 없음: {req.dir_path}")
+        raise HTTPException(status_code=400, detail=f"폴더 없음: {dir_path}")
 
     all_frames = collect_frames(folder)
     if len(all_frames) < NUM_FRAMES:
@@ -424,33 +401,26 @@ async def v1_debug_resize(req: DebugRequest):
     frames = select_frames(all_frames, NUM_FRAMES)
     resized = _resize_frames(frames)
 
-    result = []
+    imgs_html = ""
     for orig, after in zip(frames, resized):
-        import cv2
-        img = cv2.imread(after)
-        h, w = img.shape[:2] if img is not None else (0, 0)
-        result.append({
-            "original": str(orig),
-            "resized": after,
-            "size": f"{w}x{h}",
-            "file_exists": Path(after).exists(),
-            "file_bytes": Path(after).stat().st_size if Path(after).exists() else 0,
-        })
+        with open(after, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        imgs_html += (
+            '<div style="display:inline-block;margin:4px;text-align:center;">'
+            f'<img src="data:image/jpeg;base64,{b64}" style="width:200px;height:200px;object-fit:contain;border:1px solid #444;">'
+            f'<div style="color:#aaa;font-size:11px;">{Path(after).name}</div>'
+            '</div>\n'
+        )
 
-    return {
-        "frames_count": len(result),
-        "frames": result,
-        "view_url_example": f"http://localhost:8000/v1/debug/resize/image?path={resized[0]}",
-    }
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>VLM Resized Frames</title></head>
+<body style="background:#111;margin:20px;font-family:sans-serif;">
+<h2 style="color:#fff;">리사이즈된 VLM 입력 프레임 ({len(resized)}장)</h2>
+<p style="color:#888;">원본: {dir_path} | 크기: {FRAME_SIZE}x{FRAME_SIZE}</p>
+<div style="display:flex;flex-wrap:wrap;">{imgs_html}</div>
+</body></html>"""
 
-
-@app.get("/v1/debug/resize/image")
-async def v1_debug_resize_image(path: str):
-    """리사이즈된 이미지 파일을 직접 브라우저에서 확인."""
-    p = Path(path)
-    if not p.exists():
-        raise HTTPException(status_code=404, detail=f"파일 없음: {path}")
-    return FileResponse(str(p), media_type="image/jpeg")
+    return HTMLResponse(content=html)
 
 
 @app.get("/health")
