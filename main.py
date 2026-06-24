@@ -351,7 +351,7 @@ class DebugRequest(BaseModel):
 
 @app.post("/v1/debug")
 async def v1_debug(req: DebugRequest):
-    """VLM에 장면 설명만 시킨다. 프레임에서 뭘 보고 있는지 확인용."""
+    """system 없음, 프롬프트 최소. VLM이 이미지를 실제로 보는지 확인."""
     folder = Path(req.dir_path)
     if not folder.is_dir():
         raise HTTPException(status_code=400, detail=f"폴더 없음: {req.dir_path}")
@@ -364,19 +364,31 @@ async def v1_debug(req: DebugRequest):
         )
 
     frames = select_frames(all_frames, NUM_FRAMES)
-    prompt = "이 이미지들에 무엇이 보이는지 설명하라."
+    image_paths = _resize_frames(frames)
+
+    contents = [_edgellm.MessageContent("image", p) for p in image_paths]
+    contents.append(_edgellm.MessageContent("text", "Describe what you see."))
+
+    request = _edgellm.create_generation_request(
+        batch_messages=[[_edgellm.Message("user", contents)]],
+        temperature=0.2,
+        max_generate_length=256,
+        top_p=0.9,
+        top_k=50,
+        apply_chat_template=True,
+        add_generation_prompt=True,
+    )
 
     t0 = time.perf_counter()
     async with _lock:
-        raw = await asyncio.to_thread(
-            _sync_infer, frames, prompt, 256,
-            system_prompt="Describe what you see in the images. Answer in Korean.",
-        )
+        response = await asyncio.to_thread(_runtime.handle_request, request)
     elapsed = time.perf_counter() - t0
+
+    raw = response.output_texts[0] if response.output_texts else ""
 
     return {
         "description": raw,
-        "frames_used": [str(f) for f in frames],
+        "image_paths": image_paths,
         "elapsed_sec": round(elapsed, 3),
     }
 
