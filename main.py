@@ -130,8 +130,9 @@ def select_frames(frames: list[Path], target: int = NUM_FRAMES) -> list[Path]:
 
 
 def _resize_frames(frame_paths: list[Path]) -> list[str]:
-    """448x448이 아닌 이미지를 리사이즈하여 임시 파일로 저장. 이미 맞으면 원본 경로 반환."""
+    """448x448이 아닌 이미지를 리사이즈하여 임시 파일로 저장. 비율 유지 + 검정 패딩."""
     import cv2
+    import numpy as np
     resized = []
     tmp_dir = Path("/tmp/vlm_resized")
     tmp_dir.mkdir(exist_ok=True)
@@ -146,11 +147,21 @@ def _resize_frames(frame_paths: list[Path]) -> list[str]:
         h, w = img.shape[:2]
         if h == FRAME_SIZE and w == FRAME_SIZE:
             resized.append(str(p))
-        else:
-            img = cv2.resize(img, (FRAME_SIZE, FRAME_SIZE), interpolation=cv2.INTER_AREA)
-            out = tmp_dir / p.name
-            cv2.imwrite(str(out), img)
-            resized.append(str(out))
+            continue
+
+        scale = min(FRAME_SIZE / w, FRAME_SIZE / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        canvas = np.zeros((FRAME_SIZE, FRAME_SIZE, 3), dtype=np.uint8)
+        y_off = (FRAME_SIZE - new_h) // 2
+        x_off = (FRAME_SIZE - new_w) // 2
+        canvas[y_off:y_off + new_h, x_off:x_off + new_w] = img
+
+        out = tmp_dir / f"{p.stem}.jpg"
+        cv2.imwrite(str(out), canvas, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        log.info("리사이즈: %s (%dx%d → %dx%d)", p.name, w, h, FRAME_SIZE, FRAME_SIZE)
+        resized.append(str(out))
 
     return resized
 
