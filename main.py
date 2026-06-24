@@ -38,7 +38,10 @@ TOP_P = 0.9
 TOP_K = 50
 
 DETECT_PROMPT = (
-    "Look at these factory CCTV frames. Check ONLY these 4 items:\n"
+    "Look at these factory CCTV frames.\n"
+    "First: is there any person visible? If NO person is visible, output:\n"
+    '{"action":"no_person","tts_message":""}\n\n'
+    "If person IS visible, check ONLY these 4 items:\n"
     "- hat_action: someone NOT wearing a helmet or removing it\n"
     "- touch_action: someone touching a speaker\n"
     "- dangerInOut_action: someone crossing a taped restricted zone\n"
@@ -205,6 +208,9 @@ def _parse_and_validate(text: str) -> dict:
     raw_action = data.get("action", "")
     if not raw_action:
         return {"action": "", "tts_message": ""}
+
+    if raw_action.strip() == "no_person":
+        return {"action": "no_person", "tts_message": ""}
 
     valid_keys = [k.strip() for k in raw_action.split(",") if k.strip() in VALID_ACTIONS]
 
