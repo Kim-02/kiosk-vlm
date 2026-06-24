@@ -1,6 +1,5 @@
 import asyncio
 import importlib
-import json
 import logging
 import os
 import re
@@ -29,21 +28,52 @@ FRAME_SIZE = 448
 FRAME_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
 _FRAME_RE = re.compile(r"^frame_(\d+)$|^frame(\d+)$")
 
-# ── 프롬프트 / 샘플링 ────────────────────────────────────────────────────────
-SYSTEM_PROMPT = "You are a factory safety inspector analyzing CCTV footage. Only describe what you actually see. Answer in Korean."
-
+# ── 샘플링 파라미터 ──────────────────────────────────────────────────────────
 MAX_TOKENS = 256
 TEMPERATURE = 0.2
 TOP_P = 0.9
 TOP_K = 50
 
-DETECT_PROMPT = (
+# ── 프롬프트 ─────────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = "You are a factory safety inspector analyzing CCTV footage. Only describe what you actually see. Answer in Korean."
+
+PROMPT_GENERAL = (
     "이 연속 프레임은 작업 현장 CCTV 영상이다. 안전 관점에서 현재 상황을 자세히 분석하라.\n"
     "- 사람이 몇 명 보이는지\n"
     "- 각 사람이 무엇을 하고 있는지\n"
     "- 헬멧, 안전장비 착용 여부\n"
     "- 사다리, 위험 구역, 장비 접촉 등 위험 요소가 있는지\n"
     "특히 안전모 미착용, 스피커 접촉, 혼자 사다리 작업, 위험 테이프 넘기에 주의하라.\n"
+    "보이는 것만 서술하라. 추측하지 마라."
+)
+
+PROMPT_HAT = (
+    "이 연속 프레임은 작업 현장 CCTV 영상이다.\n"
+    "프레임에 보이는 사람들의 머리 부분을 집중해서 관찰하라.\n"
+    "안전모(헬멧)를 착용하고 있는 사람과 착용하지 않은 사람을 구분하라.\n"
+    "안전모를 벗고 있는 중인 사람도 포함하라.\n"
+    "보이는 것만 서술하라. 추측하지 마라."
+)
+
+PROMPT_SPEAKER = (
+    "이 연속 프레임은 작업 현장 CCTV 영상이다.\n"
+    "프레임에 스피커 또는 음향 장비가 보이는지 확인하라.\n"
+    "사람이 스피커를 만지거나 손을 대고 있는지 관찰하라.\n"
+    "보이는 것만 서술하라. 추측하지 마라."
+)
+
+PROMPT_LADDER = (
+    "이 연속 프레임은 작업 현장 CCTV 영상이다.\n"
+    "프레임에 사다리가 보이는지 확인하라.\n"
+    "사다리 위에 올라간 사람이 있는지, 아래에서 잡아주는 사람이 있는지 관찰하라.\n"
+    "혼자 사다리를 타고 있는 경우를 특히 주의하라.\n"
+    "보이는 것만 서술하라. 추측하지 마라."
+)
+
+PROMPT_TAPE = (
+    "이 연속 프레임은 작업 현장 CCTV 영상이다.\n"
+    "바닥에 위험 구역을 표시하는 테이프, 라인, 펜스가 보이는지 확인하라.\n"
+    "사람이 그 테이프나 라인을 넘어가고 있는지 관찰하라.\n"
     "보이는 것만 서술하라. 추측하지 마라."
 )
 
@@ -94,10 +124,6 @@ class AnalyzeResponse(BaseModel):
     request_id: str
     description: str
     elapsed_sec: float
-
-
-class DebugRequest(BaseModel):
-    dir_path: str
 
 
 # ── 유틸 ─────────────────────────────────────────────────────────────────────
@@ -174,72 +200,31 @@ def _run_vlm(
     return raw
 
 
-DETECT_KEYS = ["hat", "speaker", "ladder", "tape"]
-
-DETECT_TTS = {
-    "hat": "안전모를 착용하십시오",
-    "speaker": "스피커에서 손을 떼십시오",
-    "ladder": "사다리에서 내려오십시오. 혼자 사다리 작업은 금지입니다",
-    "tape": "위험 구역에서 벗어나십시오",
-}
-
-
-def _parse_response(text: str) -> dict:
-    text = text.strip()
-
-    start = text.find("{")
-    end = text.rfind("}")
-
-    description = text[:start].strip() if start > 0 else text if start == -1 else ""
-
-    flags = {k: False for k in DETECT_KEYS}
-    if start != -1 and end != -1:
-        try:
-            data = json.loads(text[start : end + 1])
-            for k in DETECT_KEYS:
-                v = data.get(k, False)
-                flags[k] = v is True or v == "true"
-        except json.JSONDecodeError:
-            pass
-        if not description:
-            description = text[:start].strip()
-
-    tts_parts = [DETECT_TTS[k] for k in DETECT_KEYS if flags[k]]
-
-    return {
-        "description": description,
-        **flags,
-        "tts_message": ", ".join(tts_parts),
-    }
-
-
-# ── 엔드포인트 ───────────────────────────────────────────────────────────────
-@app.post("/analyze", response_model=AnalyzeResponse)
-async def analyze(req: AnalyzeRequest):
-    folder = Path(req.dir_path)
+def _validate_and_select(dir_path: str) -> list[Path]:
+    folder = Path(dir_path)
     if not folder.is_dir():
-        raise HTTPException(
-            status_code=400, detail=f"폴더가 존재하지 않습니다: {req.dir_path}"
-        )
-
+        raise HTTPException(status_code=400, detail=f"폴더가 존재하지 않습니다: {dir_path}")
     all_frames = collect_frames(folder)
     if len(all_frames) < NUM_FRAMES:
         raise HTTPException(
             status_code=400,
             detail=f"프레임이 {NUM_FRAMES}장 미만입니다 (발견: {len(all_frames)}장)",
         )
+    return select_frames(all_frames, NUM_FRAMES)
 
-    frames = select_frames(all_frames, NUM_FRAMES)
+
+async def _analyze(req: AnalyzeRequest, prompt: str, tag: str) -> AnalyzeResponse:
+    frames = _validate_and_select(req.dir_path)
     request_id = str(uuid.uuid4())[:8]
 
-    log.info("analyze 시작 | req=%s | 폴더=%s | 프레임=%d", request_id, req.dir_path, len(frames))
+    log.info("%s 시작 | req=%s | 폴더=%s | 프레임=%d", tag, request_id, req.dir_path, len(frames))
     t0 = time.perf_counter()
 
     async with _lock:
-        raw = await asyncio.to_thread(_run_vlm, frames, DETECT_PROMPT, 256)
+        raw = await asyncio.to_thread(_run_vlm, frames, prompt, MAX_TOKENS)
 
     elapsed = time.perf_counter() - t0
-    log.info("analyze 완료 | req=%s | %.2fs | 응답=%s", request_id, elapsed, raw.strip())
+    log.info("%s 완료 | req=%s | %.2fs | 응답=%s", tag, request_id, elapsed, raw.strip())
 
     return AnalyzeResponse(
         request_id=request_id,
@@ -248,21 +233,42 @@ async def analyze(req: AnalyzeRequest):
     )
 
 
+# ── 엔드포인트 ───────────────────────────────────────────────────────────────
+@app.post("/analyze", response_model=AnalyzeResponse)
+async def analyze(req: AnalyzeRequest):
+    """종합 안전 분석"""
+    return await _analyze(req, PROMPT_GENERAL, "analyze")
+
+
+@app.post("/analyze/hat", response_model=AnalyzeResponse)
+async def analyze_hat(req: AnalyzeRequest):
+    """안전모 미착용 탐지"""
+    return await _analyze(req, PROMPT_HAT, "analyze/hat")
+
+
+@app.post("/analyze/speaker", response_model=AnalyzeResponse)
+async def analyze_speaker(req: AnalyzeRequest):
+    """스피커 접촉 탐지"""
+    return await _analyze(req, PROMPT_SPEAKER, "analyze/speaker")
+
+
+@app.post("/analyze/ladder", response_model=AnalyzeResponse)
+async def analyze_ladder(req: AnalyzeRequest):
+    """혼자 사다리 작업 탐지"""
+    return await _analyze(req, PROMPT_LADDER, "analyze/ladder")
+
+
+@app.post("/analyze/tape", response_model=AnalyzeResponse)
+async def analyze_tape(req: AnalyzeRequest):
+    """위험 테이프 넘기 탐지"""
+    return await _analyze(req, PROMPT_TAPE, "analyze/tape")
+
+
+# ── 디버그 ───────────────────────────────────────────────────────────────────
 @app.post("/v1/debug")
-async def v1_debug(req: DebugRequest):
+async def v1_debug(req: AnalyzeRequest):
     """프롬프트 없이 장면 설명만 요청."""
-    folder = Path(req.dir_path)
-    if not folder.is_dir():
-        raise HTTPException(status_code=400, detail=f"폴더 없음: {req.dir_path}")
-
-    all_frames = collect_frames(folder)
-    if len(all_frames) < NUM_FRAMES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"프레임 {NUM_FRAMES}장 미만 (발견: {len(all_frames)}장)",
-        )
-
-    frames = select_frames(all_frames, NUM_FRAMES)
+    frames = _validate_and_select(req.dir_path)
 
     t0 = time.perf_counter()
     async with _lock:
@@ -284,18 +290,7 @@ async def v1_debug_resize(dir_path: str):
     """브라우저에서 리사이즈된 15장 확인."""
     import base64
 
-    folder = Path(dir_path)
-    if not folder.is_dir():
-        raise HTTPException(status_code=400, detail=f"폴더 없음: {dir_path}")
-
-    all_frames = collect_frames(folder)
-    if len(all_frames) < NUM_FRAMES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"프레임 {NUM_FRAMES}장 미만 (발견: {len(all_frames)}장)",
-        )
-
-    frames = select_frames(all_frames, NUM_FRAMES)
+    frames = _validate_and_select(dir_path)
     resized = [_resize_frame(p) for p in frames]
 
     imgs_html = ""
@@ -309,15 +304,14 @@ async def v1_debug_resize(dir_path: str):
             '</div>\n'
         )
 
-    html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>VLM Resized Frames</title></head>
-<body style="background:#111;margin:20px;font-family:sans-serif;">
-<h2 style="color:#fff;">리사이즈된 VLM 입력 프레임 ({len(resized)}장)</h2>
-<p style="color:#888;">원본: {dir_path} | 타겟: {FRAME_SIZE}px</p>
-<div style="display:flex;flex-wrap:wrap;">{imgs_html}</div>
-</body></html>"""
-
-    return HTMLResponse(content=html)
+    return HTMLResponse(
+        f'<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
+        f'<body style="background:#111;margin:20px;font-family:sans-serif;">'
+        f'<h2 style="color:#fff;">리사이즈된 VLM 입력 프레임 ({len(resized)}장)</h2>'
+        f'<p style="color:#888;">원본: {dir_path} | 타겟: {FRAME_SIZE}px</p>'
+        f'<div style="display:flex;flex-wrap:wrap;">{imgs_html}</div>'
+        f'</body></html>'
+    )
 
 
 @app.get("/health")
