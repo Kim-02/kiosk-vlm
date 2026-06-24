@@ -37,18 +37,7 @@ TEMPERATURE = 0.2
 TOP_P = 0.9
 TOP_K = 50
 
-DETECT_PROMPT = (
-    "이 연속 프레임은 작업 현장 CCTV 영상이다. 현재 상황을 JSON으로 보고하라.\n\n"
-    "person_count: 보이는 사람 수 (없으면 0)\n"
-    "hat_action: 헬멧 미착용 또는 벗고 있는 사람 수\n"
-    "touch_action: 스피커를 만지고 있는 사람 수\n"
-    "dangerInOut_action: 테이프로 구분된 위험 구역을 넘고 있는 사람 수\n"
-    "ladder_action: 혼자 사다리를 타고 있는 사람 수\n"
-    "description: 현재 장면을 한국어 한 문장으로 설명\n\n"
-    "JSON만 출력. 다른 텍스트 금지.\n"
-    '{"person_count":3,"hat_action":0,"touch_action":0,"dangerInOut_action":0,"ladder_action":0,"description":"작업자 3명이 헬멧을 착용하고 정상적으로 작업 중이다"}\n'
-    '{"person_count":0,"hat_action":0,"touch_action":0,"dangerInOut_action":0,"ladder_action":0,"description":"현장에 사람이 없다"}'
-)
+DETECT_PROMPT = "Describe what the people in these frames are doing. Answer in Korean."
 
 # ── 런타임 ────────────────────────────────────────────────────────────────────
 _runtime: Any = None
@@ -95,13 +84,7 @@ class AnalyzeRequest(BaseModel):
 
 class AnalyzeResponse(BaseModel):
     request_id: str
-    person_count: int
-    hat_action: int
-    touch_action: int
-    dangerInOut_action: int
-    ladder_action: int
     description: str
-    tts_message: str
     elapsed_sec: float
 
 
@@ -255,21 +238,14 @@ async def analyze(req: AnalyzeRequest):
     t0 = time.perf_counter()
 
     async with _lock:
-        raw = await asyncio.to_thread(_run_vlm, frames, DETECT_PROMPT, MAX_TOKENS)
+        raw = await asyncio.to_thread(_run_vlm, frames, DETECT_PROMPT, 256)
 
     elapsed = time.perf_counter() - t0
     log.info("analyze 완료 | req=%s | %.2fs | 응답=%s", request_id, elapsed, raw.strip())
 
-    result = _parse_and_validate(raw)
     return AnalyzeResponse(
         request_id=request_id,
-        person_count=result["person_count"],
-        hat_action=result["hat_action"],
-        touch_action=result["touch_action"],
-        dangerInOut_action=result["dangerInOut_action"],
-        ladder_action=result["ladder_action"],
-        description=result["description"],
-        tts_message=result["tts_message"],
+        description=raw.strip(),
         elapsed_sec=round(elapsed, 3),
     )
 
