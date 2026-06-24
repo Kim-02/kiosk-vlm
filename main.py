@@ -43,13 +43,8 @@ DETECT_PROMPT = (
     "- 각 사람이 무엇을 하고 있는지\n"
     "- 헬멧, 안전장비 착용 여부\n"
     "- 사다리, 위험 구역, 장비 접촉 등 위험 요소가 있는지\n"
-    "보이는 것만 서술하라. 추측하지 마라.\n\n"
-    "서술 후 아래 4가지 위반을 JSON으로 보고하라. 해당 없으면 false.\n"
-    "hat: 안전모를 안 쓴 사람이 보이면 true\n"
-    "speaker: 스피커를 만지는 사람이 보이면 true\n"
-    "ladder: 사다리를 혼자 타는 사람이 보이면 true\n"
-    "tape: 위험 테이프를 넘는 사람이 보이면 true\n\n"
-    '예시: {"hat":false,"speaker":false,"ladder":false,"tape":false}'
+    "특히 안전모 미착용, 스피커 접촉, 혼자 사다리 작업, 위험 테이프 넘기에 주의하라.\n"
+    "보이는 것만 서술하라. 추측하지 마라."
 )
 
 # ── 런타임 ────────────────────────────────────────────────────────────────────
@@ -98,11 +93,6 @@ class AnalyzeRequest(BaseModel):
 class AnalyzeResponse(BaseModel):
     request_id: str
     description: str
-    hat: bool
-    speaker: bool
-    ladder: bool
-    tape: bool
-    tts_message: str
     elapsed_sec: float
 
 
@@ -251,15 +241,9 @@ async def analyze(req: AnalyzeRequest):
     elapsed = time.perf_counter() - t0
     log.info("analyze 완료 | req=%s | %.2fs | 응답=%s", request_id, elapsed, raw.strip())
 
-    result = _parse_response(raw)
     return AnalyzeResponse(
         request_id=request_id,
-        description=result["description"],
-        hat=result["hat"],
-        speaker=result["speaker"],
-        ladder=result["ladder"],
-        tape=result["tape"],
-        tts_message=result["tts_message"],
+        description=raw.strip(),
         elapsed_sec=round(elapsed, 3),
     )
 
