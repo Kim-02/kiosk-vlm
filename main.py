@@ -9,11 +9,11 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 import config as cfg_module
@@ -25,28 +25,31 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 NUM_FRAMES = 15
+FRAME_SIZE = 448
 FRAME_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
 _FRAME_RE = re.compile(r"^frame_(\d+)$|^frame(\d+)$")
 
 # ── 프롬프트 / 샘플링 ────────────────────────────────────────────────────────
-SYSTEM_PROMPT = (
-    "You are a vision-language model for CCTV safety monitoring. Answer in Korean."
-)
+SYSTEM_PROMPT = "You are a factory safety inspector. Only report what you actually see. Answer in JSON."
 
 MAX_TOKENS = 128
 TEMPERATURE = 0.2
 TOP_P = 0.9
 TOP_K = 50
 
-PROMPT_TEMPLATE = (
-    "공장 작업 현장 CCTV 연속 프레임이다. "
-    "아래 행동이 프레임에서 보이는지 판단하라. "
-    "보이면 해당 키를 출력하고, 보이지 않으면 빈 문자열로 둬라.\n"
-    "{detect_items}\n"
-    "JSON만 출력.\n"
-    '{{"action":"","tts_message":""}}\n'
-    "{example_single}\n"
-    "{example_multi}"
+DETECT_PROMPT = (
+    "Look at these factory CCTV frames. Check ONLY these 4 items:\n"
+    "- hat_action: someone NOT wearing a helmet or removing it\n"
+    "- touch_action: someone touching a speaker\n"
+    "- dangerInOut_action: someone crossing a taped restricted zone\n"
+    "- ladder_action: someone climbing a ladder alone\n\n"
+    "Rules:\n"
+    "- If you do NOT clearly see the action, do NOT include the key.\n"
+    "- Most frames are normal. Empty action is the expected default.\n"
+    "- Output ONLY one JSON line. No other text.\n\n"
+    '{"action":"","tts_message":""}\n'
+    '{"action":"hat_action","tts_message":"헬멧을 착용하십시오"}\n'
+    '{"action":"hat_action,dangerInOut_action","tts_message":"헬멧을 착용하고, 위험 구역에서 벗어나십시오"}'
 )
 
 # ── 런타임 ────────────────────────────────────────────────────────────────────
@@ -88,23 +91,19 @@ app = FastAPI(title="DueGo VLM Server", lifespan=lifespan)
 
 
 # ── 스키마 ────────────────────────────────────────────────────────────────────
-class DetectAction(BaseModel):
-    key: str
-    label: str
-
-
 class AnalyzeRequest(BaseModel):
     dir_path: str
-    focus: Optional[str] = None
-    detect_actions: list[DetectAction]
 
 
 class AnalyzeResponse(BaseModel):
     request_id: str
     action: str
     tts_message: str
-    prompt: str
     elapsed_sec: float
+
+
+class DebugRequest(BaseModel):
+    dir_path: str
 
 
 # ── 유틸 ─────────────────────────────────────────────────────────────────────
@@ -129,11 +128,7 @@ def select_frames(frames: list[Path], target: int = NUM_FRAMES) -> list[Path]:
     return [frames[i] for i in indices]
 
 
-FRAME_SIZE = 448
-
-
 def _resize_frame(src: Path) -> str:
-    """엔진 한도(448x448)에 맞게 리사이즈. 이미 맞으면 원본 반환."""
     import cv2
     img = cv2.imread(str(src))
     if img is None:
@@ -141,10 +136,8 @@ def _resize_frame(src: Path) -> str:
     h, w = img.shape[:2]
     if max(h, w) <= FRAME_SIZE:
         return str(src)
-
     scale = FRAME_SIZE / max(h, w)
     img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-
     tmp_dir = Path("/tmp/vlm_resized")
     tmp_dir.mkdir(exist_ok=True)
     out = tmp_dir / f"{src.stem}.jpg"
@@ -152,22 +145,20 @@ def _resize_frame(src: Path) -> str:
     return str(out)
 
 
-def _sync_infer(
+def _run_vlm(
     frame_paths: list[Path], prompt: str, max_tokens: int,
     system_prompt: str = SYSTEM_PROMPT,
 ) -> str:
-    resized_paths = [_resize_frame(p) for p in frame_paths]
+    resized = [_resize_frame(p) for p in frame_paths]
 
     image_buffers = []
-    for rp in resized_paths:
-        img = _edgellm.load_image_from_path(rp)
-        image_buffers.append(img)
-        log.info("이미지: %s → %dx%d", Path(rp).name, img.width, img.height)
+    for rp in resized:
+        image_buffers.append(_edgellm.load_image_from_path(rp))
 
     messages = [
         _edgellm.Message("system", [_edgellm.MessageContent("text", system_prompt)]),
     ]
-    contents = [_edgellm.MessageContent("image", rp) for rp in resized_paths]
+    contents = [_edgellm.MessageContent("image", rp) for rp in resized]
     contents.append(_edgellm.MessageContent("text", prompt))
     messages.append(_edgellm.Message("user", contents))
 
@@ -189,16 +180,39 @@ def _sync_infer(
     return raw
 
 
-def _parse_json(text: str) -> dict:
+VALID_ACTIONS = {"hat_action", "touch_action", "dangerInOut_action", "ladder_action"}
+
+ACTION_TTS = {
+    "hat_action": "헬멧을 착용하십시오",
+    "touch_action": "스피커에서 손을 떼십시오",
+    "dangerInOut_action": "위험 구역에서 벗어나십시오",
+    "ladder_action": "사다리에서 내려오십시오. 혼자 사다리 작업은 금지입니다",
+}
+
+
+def _parse_and_validate(text: str) -> dict:
     text = text.strip()
     start = text.find("{")
     end = text.rfind("}")
-    if start != -1 and end != -1:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            pass
-    return {"action": "", "tts_message": ""}
+    if start == -1 or end == -1:
+        return {"action": "", "tts_message": ""}
+
+    try:
+        data = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return {"action": "", "tts_message": ""}
+
+    raw_action = data.get("action", "")
+    if not raw_action:
+        return {"action": "", "tts_message": ""}
+
+    valid_keys = [k.strip() for k in raw_action.split(",") if k.strip() in VALID_ACTIONS]
+
+    if not valid_keys:
+        return {"action": "", "tts_message": ""}
+
+    tts = ", ".join(ACTION_TTS[k] for k in valid_keys)
+    return {"action": ",".join(valid_keys), "tts_message": tts}
 
 
 # ── 엔드포인트 ───────────────────────────────────────────────────────────────
@@ -218,133 +232,29 @@ async def analyze(req: AnalyzeRequest):
         )
 
     frames = select_frames(all_frames, NUM_FRAMES)
-
-    actions = [a.model_dump() for a in req.detect_actions]
-    detect_items = "\n".join(f'- {a["key"]}: {a["label"]}' for a in actions)
-
-    first = actions[0]
-    example_single = json.dumps(
-        {"action": first["key"], "tts_message": first["label"] + "이 감지되었습니다. 즉시 중단하십시오"},
-        ensure_ascii=False,
-    )
-    if len(actions) >= 2:
-        second = actions[1]
-        example_multi = json.dumps(
-            {
-                "action": f'{first["key"]},{second["key"]}',
-                "tts_message": f'{first["label"]}이 감지되고, {second["label"]}이 감지되었습니다. 즉시 중단하십시오',
-            },
-            ensure_ascii=False,
-        )
-    else:
-        example_multi = example_single
-
-    prompt = PROMPT_TEMPLATE.format(
-        detect_items=detect_items,
-        example_single=example_single,
-        example_multi=example_multi,
-    )
-    if req.focus:
-        prompt += "\n관찰 영역: " + req.focus
-
     request_id = str(uuid.uuid4())[:8]
-    log.info(
-        "analyze 시작 | req=%s | 폴더=%s | 프레임=%d | focus=%s",
-        request_id, req.dir_path, len(frames), req.focus or "(없음)",
-    )
+
+    log.info("analyze 시작 | req=%s | 폴더=%s | 프레임=%d", request_id, req.dir_path, len(frames))
     t0 = time.perf_counter()
 
     async with _lock:
-        raw = await asyncio.to_thread(
-            _sync_infer, frames, prompt, MAX_TOKENS,
-        )
+        raw = await asyncio.to_thread(_run_vlm, frames, DETECT_PROMPT, MAX_TOKENS)
 
     elapsed = time.perf_counter() - t0
     log.info("analyze 완료 | req=%s | %.2fs | 응답=%s", request_id, elapsed, raw.strip())
 
-    result = _parse_json(raw)
+    result = _parse_and_validate(raw)
     return AnalyzeResponse(
         request_id=request_id,
-        action=result.get("action", ""),
-        tts_message=result.get("tts_message", ""),
-        prompt=prompt,
+        action=result["action"],
+        tts_message=result["tts_message"],
         elapsed_sec=round(elapsed, 3),
     )
 
 
-@app.post("/debug/analyze_raw")
-async def debug_analyze_raw(req: AnalyzeRequest):
-    """추론 없이 런타임에 전달될 요청 구조만 반환."""
-    folder = Path(req.dir_path)
-    if not folder.is_dir():
-        raise HTTPException(status_code=400, detail=f"폴더 없음: {req.dir_path}")
-
-    all_frames = collect_frames(folder)
-    if len(all_frames) < NUM_FRAMES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"프레임 {NUM_FRAMES}장 미만 (발견: {len(all_frames)}장)",
-        )
-
-    frames = select_frames(all_frames, NUM_FRAMES)
-
-    actions = [a.model_dump() for a in req.detect_actions]
-    detect_items = "\n".join(f'- {a["key"]}: {a["label"]}' for a in actions)
-
-    first = actions[0]
-    example_single = json.dumps(
-        {"action": first["key"], "tts_message": first["label"] + "이 감지되었습니다. 즉시 중단하십시오"},
-        ensure_ascii=False,
-    )
-    if len(actions) >= 2:
-        second = actions[1]
-        example_multi = json.dumps(
-            {
-                "action": f'{first["key"]},{second["key"]}',
-                "tts_message": f'{first["label"]}이 감지되고, {second["label"]}이 감지되었습니다. 즉시 중단하십시오',
-            },
-            ensure_ascii=False,
-        )
-    else:
-        example_multi = example_single
-
-    prompt = PROMPT_TEMPLATE.format(
-        detect_items=detect_items,
-        example_single=example_single,
-        example_multi=example_multi,
-    )
-    if req.focus:
-        prompt += "\n관찰 영역: " + req.focus
-
-    return {
-        "frames_found": len(all_frames),
-        "frames_selected": [str(f) for f in frames],
-        "request": {
-            "batch_size": 1,
-            "temperature": TEMPERATURE,
-            "top_p": TOP_P,
-            "top_k": TOP_K,
-            "max_generate_length": MAX_TOKENS,
-            "requests": [{
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": [
-                        *[{"type": "image", "image": str(p)} for p in frames],
-                        {"type": "text", "text": prompt},
-                    ]},
-                ]
-            }],
-        },
-    }
-
-
-class DebugRequest(BaseModel):
-    dir_path: str
-
-
 @app.post("/v1/debug")
 async def v1_debug(req: DebugRequest):
-    """15장 로드 + image_buffers + 순수 설명 요청."""
+    """프롬프트 없이 장면 설명만 요청."""
     folder = Path(req.dir_path)
     if not folder.is_dir():
         raise HTTPException(status_code=400, detail=f"폴더 없음: {req.dir_path}")
@@ -357,90 +267,25 @@ async def v1_debug(req: DebugRequest):
         )
 
     frames = select_frames(all_frames, NUM_FRAMES)
-    resized = [_resize_frame(p) for p in frames]
-
-    image_buffers = []
-    for rp in resized:
-        img = _edgellm.load_image_from_path(rp)
-        image_buffers.append(img)
-        log.info("이미지 로드: %s → %dx%d", Path(rp).name, img.width, img.height)
-
-    contents = [_edgellm.MessageContent("image", rp) for rp in resized]
-    contents.append(_edgellm.MessageContent("text", "Describe what you see."))
-
-    gen_req = _edgellm.create_generation_request(
-        batch_messages=[[_edgellm.Message("user", contents)]],
-        temperature=0.2,
-        max_generate_length=256,
-        top_p=0.9,
-        top_k=50,
-        apply_chat_template=True,
-        add_generation_prompt=True,
-    )
-    gen_req.requests[0].image_buffers = image_buffers
 
     t0 = time.perf_counter()
     async with _lock:
-        response = await asyncio.to_thread(_runtime.handle_request, gen_req)
+        raw = await asyncio.to_thread(
+            _run_vlm, frames, "Describe what you see.", 256,
+            system_prompt="Describe the images. Answer in Korean.",
+        )
     elapsed = time.perf_counter() - t0
-
-    raw = response.output_texts[0] if response.output_texts else ""
 
     return {
         "description": raw,
         "frames_used": [str(f) for f in frames],
-        "image_count": len(image_buffers),
         "elapsed_sec": round(elapsed, 3),
-    }
-
-
-@app.get("/v1/debug/pybind")
-async def v1_debug_pybind():
-    """pybind 모듈의 클래스/메서드/속성 전체 목록을 반환."""
-    import inspect
-    result = {}
-
-    for name in sorted(dir(_edgellm)):
-        if name.startswith("_"):
-            continue
-        obj = getattr(_edgellm, name)
-        info = {"type": type(obj).__name__}
-        if inspect.isclass(obj):
-            info["methods"] = [m for m in dir(obj) if not m.startswith("_")]
-            try:
-                sig = inspect.signature(obj.__init__)
-                info["init_params"] = str(sig)
-            except (ValueError, TypeError):
-                info["init_params"] = "확인 불가"
-        result[name] = info
-
-    runtime_info = {}
-    for name in sorted(dir(_runtime)):
-        if name.startswith("_"):
-            continue
-        obj = getattr(_runtime, name)
-        runtime_info[name] = type(obj).__name__
-
-    mc_info = {}
-    try:
-        mc = _edgellm.MessageContent("text", "test")
-        for name in sorted(dir(mc)):
-            if not name.startswith("_"):
-                mc_info[name] = type(getattr(mc, name)).__name__
-    except Exception as e:
-        mc_info["error"] = str(e)
-
-    return {
-        "module_members": result,
-        "runtime_members": runtime_info,
-        "message_content_members": mc_info,
     }
 
 
 @app.get("/v1/debug/resize")
 async def v1_debug_resize(dir_path: str):
-    """GET으로 접근 — 브라우저에서 리사이즈된 15장을 한눈에 확인."""
-    from fastapi.responses import HTMLResponse
+    """브라우저에서 리사이즈된 15장 확인."""
     import base64
 
     folder = Path(dir_path)
@@ -455,10 +300,10 @@ async def v1_debug_resize(dir_path: str):
         )
 
     frames = select_frames(all_frames, NUM_FRAMES)
-    resized = _resize_frames(frames)
+    resized = [_resize_frame(p) for p in frames]
 
     imgs_html = ""
-    for orig, after in zip(frames, resized):
+    for after in resized:
         with open(after, "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
         imgs_html += (
@@ -472,7 +317,7 @@ async def v1_debug_resize(dir_path: str):
 <html><head><meta charset="utf-8"><title>VLM Resized Frames</title></head>
 <body style="background:#111;margin:20px;font-family:sans-serif;">
 <h2 style="color:#fff;">리사이즈된 VLM 입력 프레임 ({len(resized)}장)</h2>
-<p style="color:#888;">원본: {dir_path} | 크기: {FRAME_SIZE}x{FRAME_SIZE}</p>
+<p style="color:#888;">원본: {dir_path} | 타겟: {FRAME_SIZE}px</p>
 <div style="display:flex;flex-wrap:wrap;">{imgs_html}</div>
 </body></html>"""
 
