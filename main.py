@@ -32,15 +32,14 @@ SYSTEM_PROMPT = (
     "You are a vision-language model for CCTV safety monitoring. Answer in Korean."
 )
 VLM_PROMPT_BASE = (
-    "다음 15장의 CCTV 프레임은 시간 순서대로 촬영된 공장 작업 현장 연속 장면이다. "
-    "각 프레임을 개별로 보지 말고 전체 흐름을 하나의 장면으로 분석하라. "
-    "장면에 보이는 환경, 사람, 장비, 물체를 묘사하고 "
-    "사람이 어떤 행동을 하고 있는지 구체적으로 서술하라."
+    "공장 작업 현장 CCTV 연속 프레임이다. "
+    "장면의 환경, 사람, 장비를 간결하게 묘사하고 사람의 행동을 서술하라. "
+    "같은 내용을 반복하지 마라."
 )
 VLM_FOCUS_PREFIX = " 특히 다음 항목에 주의하여 관찰하라: "
 
-VLM_MAX_TOKENS = 256
-LLM_MAX_TOKENS = 200
+VLM_MAX_TOKENS = 150
+LLM_MAX_TOKENS = 128
 TEMPERATURE = 0.2
 TOP_P = 0.9
 TOP_K = 50
@@ -49,10 +48,12 @@ LLM_PROMPT_TEMPLATE = (
     "현장 설명:\n{vlm_output}\n\n"
     "위 설명에서 아래 위험 행동을 감지하라.\n"
     "{detect_items}\n\n"
-    "JSON만 출력하라.\n"
-    '{{"action":"감지키를_쉼표구분","tts_message":"경고문"}}\n'
-    "action: 감지된 키만 나열. 없으면 빈 문자열.\n"
-    "tts_message: 위험 사유와 함께 행동을 중단하십시오로 끝나는 문장. 없으면 빈 문자열."
+    "JSON 한 줄만 출력하라. 다른 텍스트 금지.\n"
+    "action: 감지된 키를 쉼표로 나열. 없으면 빈 문자열.\n"
+    'tts_message: 구체적 경고 문장. 없으면 빈 문자열.\n\n'
+    "예시:\n"
+    '{{"action":"hat_action,ladder_action","tts_message":"안전모를 착용하지 않은 상태에서 사다리 작업을 하고 있습니다. 즉시 행동을 중단하십시오"}}\n'
+    '{{"action":"","tts_message":""}}'
 )
 
 DEFAULT_DETECT_ACTIONS: list[dict] = [
