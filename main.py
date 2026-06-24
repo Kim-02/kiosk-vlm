@@ -38,23 +38,14 @@ TOP_P = 0.9
 TOP_K = 50
 
 PROMPT_TEMPLATE = (
-    "공장 작업 현장 CCTV 연속 프레임이다. "
-    "프레임에 실제로 보이는 것만 근거로 아래 위험 행동 해당 여부를 판단하라. "
-    "확실하지 않으면 해당 없음으로 처리하라. 추측하지 마라.\n"
-    "{detect_items}\n\n"
-    "JSON 한 줄만 출력하라. 다른 텍스트 금지.\n"
-    "action: 프레임에서 확실히 확인된 키만 쉼표로 나열. 하나도 없으면 빈 문자열.\n"
-    "tts_message: 감지된 행동이 있을 때만 구체적 경고 문장. 없으면 빈 문자열.\n\n"
-    '{{"action":"hat_action","tts_message":"안전모를 착용하지 않은 상태에서 작업을 하고 있습니다. 즉시 행동을 중단하십시오"}}\n'
-    '{{"action":"","tts_message":""}}'
+    "공장 CCTV 프레임이다. 대부분은 정상이다. "
+    "아래 행동이 확실히 보일 때만 해당 키를 출력하라. 안 보이면 빈 문자열로 둬라.\n"
+    "{detect_items}\n"
+    "JSON만 출력.\n"
+    '{{"action":"","tts_message":""}}\n'
+    "{example_single}\n"
+    "{example_multi}"
 )
-
-DEFAULT_DETECT_ACTIONS: list[dict] = [
-    {"key": "hat_action", "label": "안전모 미착용 또는 벗는 행동"},
-    {"key": "touch_action", "label": "스피커를 만지는 행동"},
-    {"key": "dangerInOut_action", "label": "금지 구역 출입"},
-    {"key": "ladder_action", "label": "사다리를 올라가거나 단독 사다리 작업"},
-]
 
 # ── 런타임 ────────────────────────────────────────────────────────────────────
 _runtime: Any = None
@@ -103,7 +94,7 @@ class DetectAction(BaseModel):
 class AnalyzeRequest(BaseModel):
     dir_path: str
     focus: Optional[str] = None
-    detect_actions: Optional[list[DetectAction]] = None
+    detect_actions: list[DetectAction]
 
 
 class AnalyzeResponse(BaseModel):
@@ -190,16 +181,33 @@ async def analyze(req: AnalyzeRequest):
 
     frames = select_frames(all_frames, NUM_FRAMES)
 
-    actions = (
-        [a.model_dump() for a in req.detect_actions]
-        if req.detect_actions
-        else DEFAULT_DETECT_ACTIONS
-    )
+    actions = [a.model_dump() for a in req.detect_actions]
     detect_items = "\n".join(f'- {a["key"]}: {a["label"]}' for a in actions)
 
-    prompt = PROMPT_TEMPLATE.format(detect_items=detect_items)
+    first = actions[0]
+    example_single = json.dumps(
+        {"action": first["key"], "tts_message": first["label"] + "이 감지되었습니다. 즉시 중단하십시오"},
+        ensure_ascii=False,
+    )
+    if len(actions) >= 2:
+        second = actions[1]
+        example_multi = json.dumps(
+            {
+                "action": f'{first["key"]},{second["key"]}',
+                "tts_message": f'{first["label"]}이 감지되고, {second["label"]}이 감지되었습니다. 즉시 중단하십시오',
+            },
+            ensure_ascii=False,
+        )
+    else:
+        example_multi = example_single
+
+    prompt = PROMPT_TEMPLATE.format(
+        detect_items=detect_items,
+        example_single=example_single,
+        example_multi=example_multi,
+    )
     if req.focus:
-        prompt += "\n특히 주의: " + req.focus
+        prompt += "\n관찰 영역: " + req.focus
 
     request_id = str(uuid.uuid4())[:8]
     log.info(
@@ -241,16 +249,33 @@ async def debug_analyze_raw(req: AnalyzeRequest):
 
     frames = select_frames(all_frames, NUM_FRAMES)
 
-    actions = (
-        [a.model_dump() for a in req.detect_actions]
-        if req.detect_actions
-        else DEFAULT_DETECT_ACTIONS
-    )
+    actions = [a.model_dump() for a in req.detect_actions]
     detect_items = "\n".join(f'- {a["key"]}: {a["label"]}' for a in actions)
 
-    prompt = PROMPT_TEMPLATE.format(detect_items=detect_items)
+    first = actions[0]
+    example_single = json.dumps(
+        {"action": first["key"], "tts_message": first["label"] + "이 감지되었습니다. 즉시 중단하십시오"},
+        ensure_ascii=False,
+    )
+    if len(actions) >= 2:
+        second = actions[1]
+        example_multi = json.dumps(
+            {
+                "action": f'{first["key"]},{second["key"]}',
+                "tts_message": f'{first["label"]}이 감지되고, {second["label"]}이 감지되었습니다. 즉시 중단하십시오',
+            },
+            ensure_ascii=False,
+        )
+    else:
+        example_multi = example_single
+
+    prompt = PROMPT_TEMPLATE.format(
+        detect_items=detect_items,
+        example_single=example_single,
+        example_multi=example_multi,
+    )
     if req.focus:
-        prompt += "\n특히 주의: " + req.focus
+        prompt += "\n관찰 영역: " + req.focus
 
     return {
         "frames_found": len(all_frames),
