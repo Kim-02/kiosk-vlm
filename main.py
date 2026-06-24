@@ -160,7 +160,6 @@ def _resize_frames(frame_paths: list[Path]) -> list[str]:
 
         out = tmp_dir / f"{p.stem}.jpg"
         cv2.imwrite(str(out), canvas, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        log.info("리사이즈: %s (%dx%d → %dx%d)", p.name, w, h, FRAME_SIZE, FRAME_SIZE)
         resized.append(str(out))
 
     return resized
