@@ -78,9 +78,8 @@ PROMPT_TAPE = (
 )
 
 PROMPT_FIST = (
-    "이 연속 프레임은 작업 현장 CCTV 영상이다.\n"
-    "프레임에 보이는 사람들의 손을 집중해서 관찰하라.\n"
-    "주먹을 쥐고 있는 사람이 있는지 확인하라.\n"
+    "이 연속 프레임을 관찰하라.\n"
+    "주황색 가방이 보이는지 확인하라.\n"
     "보이는 것만 서술하라. 추측하지 마라."
 )
 
@@ -295,10 +294,11 @@ async def analyze_fist(req: AnalyzeRequest):
     desc = raw.strip()
     log.info("analyze/fist 완료 | req=%s | %.2fs | 응답=%s", request_id, elapsed, desc[:200])
 
-    has_fist = "주먹" in desc
+    keywords = ["주황", "오렌지", "orange"]
     negatives = ["보이지 않", "없습니다", "없다", "확인되지 않", "발견되지 않"]
+    has_keyword = any(k in desc.lower() for k in keywords)
     denied = any(n in desc for n in negatives)
-    detected = has_fist and not denied
+    detected = has_keyword and not denied
     return FistResponse(
         request_id=request_id,
         description=desc if detected else "",
