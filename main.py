@@ -38,20 +38,16 @@ TOP_P = 0.9
 TOP_K = 50
 
 DETECT_PROMPT = (
-    "Look at these factory CCTV frames.\n"
-    "Count the total number of people visible. If 0, output:\n"
-    '{"person_count":0,"hat_action":0,"touch_action":0,"dangerInOut_action":0,"ladder_action":0}\n\n'
-    "If people ARE visible, count how many people are doing each:\n"
-    "- hat_action: NOT wearing a helmet or removing it\n"
-    "- touch_action: touching a speaker\n"
-    "- dangerInOut_action: crossing a taped restricted zone\n"
-    "- ladder_action: climbing a ladder alone\n\n"
-    "Rules:\n"
-    "- Count only what you clearly see. If unsure, count as 0.\n"
-    "- Most frames are normal. All 0 is the expected default.\n"
-    "- Output ONLY one JSON line. No other text.\n\n"
-    '{"person_count":3,"hat_action":0,"touch_action":0,"dangerInOut_action":0,"ladder_action":0}\n'
-    '{"person_count":2,"hat_action":1,"touch_action":0,"dangerInOut_action":1,"ladder_action":0}'
+    "이 연속 프레임은 작업 현장 CCTV 영상이다. 현재 상황을 JSON으로 보고하라.\n\n"
+    "person_count: 보이는 사람 수 (없으면 0)\n"
+    "hat_action: 헬멧 미착용 또는 벗고 있는 사람 수\n"
+    "touch_action: 스피커를 만지고 있는 사람 수\n"
+    "dangerInOut_action: 테이프로 구분된 위험 구역을 넘고 있는 사람 수\n"
+    "ladder_action: 혼자 사다리를 타고 있는 사람 수\n"
+    "description: 현재 장면을 한국어 한 문장으로 설명\n\n"
+    "JSON만 출력. 다른 텍스트 금지.\n"
+    '{"person_count":3,"hat_action":0,"touch_action":0,"dangerInOut_action":0,"ladder_action":0,"description":"작업자 3명이 헬멧을 착용하고 정상적으로 작업 중이다"}\n'
+    '{"person_count":0,"hat_action":0,"touch_action":0,"dangerInOut_action":0,"ladder_action":0,"description":"현장에 사람이 없다"}'
 )
 
 # ── 런타임 ────────────────────────────────────────────────────────────────────
@@ -104,6 +100,7 @@ class AnalyzeResponse(BaseModel):
     touch_action: int
     dangerInOut_action: int
     ladder_action: int
+    description: str
     tts_message: str
     elapsed_sec: float
 
@@ -198,6 +195,7 @@ ACTION_TTS = {
 EMPTY_RESULT = {
     "person_count": 0,
     "hat_action": 0, "touch_action": 0, "dangerInOut_action": 0, "ladder_action": 0,
+    "description": "",
     "tts_message": "",
 }
 
@@ -229,6 +227,7 @@ def _parse_and_validate(text: str) -> dict:
     return {
         "person_count": person_count,
         **counts,
+        "description": str(data.get("description", "")),
         "tts_message": ", ".join(tts_parts),
     }
 
@@ -269,6 +268,7 @@ async def analyze(req: AnalyzeRequest):
         touch_action=result["touch_action"],
         dangerInOut_action=result["dangerInOut_action"],
         ladder_action=result["ladder_action"],
+        description=result["description"],
         tts_message=result["tts_message"],
         elapsed_sec=round(elapsed, 3),
     )
