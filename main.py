@@ -129,19 +129,45 @@ def select_frames(frames: list[Path], target: int = NUM_FRAMES) -> list[Path]:
     return [frames[i] for i in indices]
 
 
+FRAME_SIZE = 448
+
+
+def _resize_frame(src: Path) -> str:
+    """엔진 한도(448x448)에 맞게 리사이즈. 이미 맞으면 원본 반환."""
+    import cv2
+    img = cv2.imread(str(src))
+    if img is None:
+        return str(src)
+    h, w = img.shape[:2]
+    if max(h, w) <= FRAME_SIZE:
+        return str(src)
+
+    scale = FRAME_SIZE / max(h, w)
+    img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
+    tmp_dir = Path("/tmp/vlm_resized")
+    tmp_dir.mkdir(exist_ok=True)
+    out = tmp_dir / f"{src.stem}.jpg"
+    cv2.imwrite(str(out), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    return str(out)
+
+
 def _sync_infer(
     frame_paths: list[Path], prompt: str, max_tokens: int,
     system_prompt: str = SYSTEM_PROMPT,
 ) -> str:
+    resized_paths = [_resize_frame(p) for p in frame_paths]
+
     image_buffers = []
-    for p in frame_paths:
-        img = _edgellm.load_image_from_path(str(p))
+    for rp in resized_paths:
+        img = _edgellm.load_image_from_path(rp)
         image_buffers.append(img)
+        log.info("이미지: %s → %dx%d", Path(rp).name, img.width, img.height)
 
     messages = [
         _edgellm.Message("system", [_edgellm.MessageContent("text", system_prompt)]),
     ]
-    contents = [_edgellm.MessageContent("image", str(p)) for p in frame_paths]
+    contents = [_edgellm.MessageContent("image", rp) for rp in resized_paths]
     contents.append(_edgellm.MessageContent("text", prompt))
     messages.append(_edgellm.Message("user", contents))
 
