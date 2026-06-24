@@ -351,7 +351,7 @@ class DebugRequest(BaseModel):
 
 @app.post("/v1/debug")
 async def v1_debug(req: DebugRequest):
-    """이미지 1장만, 리사이즈 없이, 원본 경로 그대로 pybind에 전달. 최소 테스트."""
+    """load_image_from_path + image_buffers 방식 테스트."""
     folder = Path(req.dir_path)
     if not folder.is_dir():
         raise HTTPException(status_code=400, detail=f"폴더 없음: {req.dir_path}")
@@ -360,14 +360,17 @@ async def v1_debug(req: DebugRequest):
     if not all_frames:
         raise HTTPException(status_code=400, detail="프레임 없음")
 
-    test_image = str(all_frames[0])
+    test_path = str(all_frames[0])
+
+    img_data = _edgellm.load_image_from_path(test_path)
+    log.info("이미지 로드: %s → %dx%d ch=%d", test_path, img_data.width, img_data.height, img_data.channels)
 
     contents = [
-        _edgellm.MessageContent("image", test_image),
+        _edgellm.MessageContent("image", test_path),
         _edgellm.MessageContent("text", "Describe what you see."),
     ]
 
-    request = _edgellm.create_generation_request(
+    gen_req = _edgellm.create_generation_request(
         batch_messages=[[_edgellm.Message("user", contents)]],
         temperature=0.2,
         max_generate_length=256,
@@ -377,16 +380,19 @@ async def v1_debug(req: DebugRequest):
         add_generation_prompt=True,
     )
 
+    gen_req.requests[0].image_buffers = [img_data]
+
     t0 = time.perf_counter()
     async with _lock:
-        response = await asyncio.to_thread(_runtime.handle_request, request)
+        response = await asyncio.to_thread(_runtime.handle_request, gen_req)
     elapsed = time.perf_counter() - t0
 
     raw = response.output_texts[0] if response.output_texts else ""
 
     return {
         "description": raw,
-        "test_image": test_image,
+        "test_image": test_path,
+        "image_info": f"{img_data.width}x{img_data.height} ch={img_data.channels}",
         "elapsed_sec": round(elapsed, 3),
     }
 
