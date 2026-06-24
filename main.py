@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 import config as cfg_module
@@ -378,6 +379,52 @@ async def v1_debug(req: DebugRequest):
         "frames_used": [str(f) for f in frames],
         "elapsed_sec": round(elapsed, 3),
     }
+
+
+@app.post("/v1/debug/resize")
+async def v1_debug_resize(req: DebugRequest):
+    """리사이즈된 이미지 목록 확인. /v1/debug/resize/image?path= 로 개별 이미지 확인."""
+    folder = Path(req.dir_path)
+    if not folder.is_dir():
+        raise HTTPException(status_code=400, detail=f"폴더 없음: {req.dir_path}")
+
+    all_frames = collect_frames(folder)
+    if len(all_frames) < NUM_FRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"프레임 {NUM_FRAMES}장 미만 (발견: {len(all_frames)}장)",
+        )
+
+    frames = select_frames(all_frames, NUM_FRAMES)
+    resized = _resize_frames(frames)
+
+    result = []
+    for orig, after in zip(frames, resized):
+        import cv2
+        img = cv2.imread(after)
+        h, w = img.shape[:2] if img is not None else (0, 0)
+        result.append({
+            "original": str(orig),
+            "resized": after,
+            "size": f"{w}x{h}",
+            "file_exists": Path(after).exists(),
+            "file_bytes": Path(after).stat().st_size if Path(after).exists() else 0,
+        })
+
+    return {
+        "frames_count": len(result),
+        "frames": result,
+        "view_url_example": f"http://localhost:8000/v1/debug/resize/image?path={resized[0]}",
+    }
+
+
+@app.get("/v1/debug/resize/image")
+async def v1_debug_resize_image(path: str):
+    """리사이즈된 이미지 파일을 직접 브라우저에서 확인."""
+    p = Path(path)
+    if not p.exists():
+        raise HTTPException(status_code=404, detail=f"파일 없음: {path}")
+    return FileResponse(str(p), media_type="image/jpeg")
 
 
 @app.get("/health")
