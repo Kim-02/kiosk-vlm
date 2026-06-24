@@ -319,7 +319,7 @@ async def v1_debug(req: DebugRequest):
         )
 
     frames = select_frames(all_frames, NUM_FRAMES)
-    prompt = "이 화면을 두 줄로 간단하게 설명해라"
+    prompt = "이 화면을 설명해라 (한국어로)."
 
     t0 = time.perf_counter()
     async with _lock:
