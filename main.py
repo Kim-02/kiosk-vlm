@@ -295,7 +295,10 @@ async def analyze_fist(req: AnalyzeRequest):
     desc = raw.strip()
     log.info("analyze/fist 완료 | req=%s | %.2fs | 응답=%s", request_id, elapsed, desc[:200])
 
-    detected = "주먹" in desc
+    has_fist = "주먹" in desc
+    negatives = ["보이지 않", "없습니다", "없다", "확인되지 않", "발견되지 않"]
+    denied = any(n in desc for n in negatives)
+    detected = has_fist and not denied
     return FistResponse(
         request_id=request_id,
         description=desc if detected else "",
