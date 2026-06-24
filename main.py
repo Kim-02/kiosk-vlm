@@ -31,28 +31,21 @@ _FRAME_RE = re.compile(r"^frame_(\d+)$|^frame(\d+)$")
 SYSTEM_PROMPT = (
     "You are a vision-language model for CCTV safety monitoring. Answer in Korean."
 )
-VLM_PROMPT_BASE = (
-    "공장 작업 현장 CCTV 연속 프레임이다. "
-    "장면의 환경, 사람, 장비를 간결하게 묘사하고 사람의 행동을 서술하라. "
-    "같은 내용을 반복하지 마라."
-)
-VLM_FOCUS_PREFIX = " 특히 다음 항목에 주의하여 관찰하라: "
 
-VLM_MAX_TOKENS = 150
-LLM_MAX_TOKENS = 128
+MAX_TOKENS = 128
 TEMPERATURE = 0.2
 TOP_P = 0.9
 TOP_K = 50
 
-LLM_PROMPT_TEMPLATE = (
-    "현장 설명:\n{vlm_output}\n\n"
-    "위 설명에서 아래 위험 행동을 감지하라.\n"
+PROMPT_TEMPLATE = (
+    "공장 작업 현장 CCTV 연속 프레임이다. "
+    "프레임에 실제로 보이는 것만 근거로 아래 위험 행동 해당 여부를 판단하라. "
+    "확실하지 않으면 해당 없음으로 처리하라. 추측하지 마라.\n"
     "{detect_items}\n\n"
     "JSON 한 줄만 출력하라. 다른 텍스트 금지.\n"
-    "action: 감지된 키를 쉼표로 나열. 없으면 빈 문자열.\n"
-    'tts_message: 구체적 경고 문장. 없으면 빈 문자열.\n\n'
-    "예시:\n"
-    '{{"action":"hat_action,ladder_action","tts_message":"안전모를 착용하지 않은 상태에서 사다리 작업을 하고 있습니다. 즉시 행동을 중단하십시오"}}\n'
+    "action: 프레임에서 확실히 확인된 키만 쉼표로 나열. 하나도 없으면 빈 문자열.\n"
+    "tts_message: 감지된 행동이 있을 때만 구체적 경고 문장. 없으면 빈 문자열.\n\n"
+    '{{"action":"hat_action","tts_message":"안전모를 착용하지 않은 상태에서 작업을 하고 있습니다. 즉시 행동을 중단하십시오"}}\n'
     '{{"action":"","tts_message":""}}'
 )
 
@@ -62,21 +55,6 @@ DEFAULT_DETECT_ACTIONS: list[dict] = [
     {"key": "dangerInOut_action", "label": "금지 구역 출입"},
     {"key": "ladder_action", "label": "사다리를 올라가거나 단독 사다리 작업"},
 ]
-
-# ── v1 1패스 프롬프트 ────────────────────────────────────────────────────────
-V1_MAX_TOKENS = 128
-
-V1_PROMPT_TEMPLATE = (
-    "공장 작업 현장 CCTV 연속 프레임이다. "
-    "아래 위험 행동이 보이는지 판단하라.\n"
-    "{detect_items}\n\n"
-    "JSON 한 줄만 출력하라. 다른 텍스트 금지.\n"
-    "action: 감지된 키를 쉼표로 나열. 없으면 빈 문자열.\n"
-    "tts_message: 구체적 경고 문장. 없으면 빈 문자열.\n\n"
-    "예시:\n"
-    '{{"action":"hat_action,ladder_action","tts_message":"안전모를 착용하지 않은 상태에서 사다리 작업을 하고 있습니다. 즉시 행동을 중단하십시오"}}\n'
-    '{{"action":"","tts_message":""}}'
-)
 
 # ── 런타임 ────────────────────────────────────────────────────────────────────
 _runtime: Any = None
@@ -132,14 +110,6 @@ class AnalyzeResponse(BaseModel):
     request_id: str
     action: str
     tts_message: str
-    vlm_description: str
-    elapsed_sec: float
-
-
-class V1AnalyzeResponse(BaseModel):
-    request_id: str
-    action: str
-    tts_message: str
     elapsed_sec: float
 
 
@@ -165,22 +135,7 @@ def select_frames(frames: list[Path], target: int = NUM_FRAMES) -> list[Path]:
     return [frames[i] for i in indices]
 
 
-def _build_gen_kwargs(
-    batch_messages: list, max_tokens: int,
-    temperature: float, top_p: float, top_k: int,
-) -> dict:
-    return dict(
-        batch_messages=batch_messages,
-        temperature=temperature,
-        max_generate_length=max_tokens,
-        top_p=top_p,
-        top_k=top_k,
-        apply_chat_template=True,
-        add_generation_prompt=True,
-    )
-
-
-def _sync_vlm_infer(frame_paths: list[Path], prompt: str, max_tokens: int) -> str:
+def _sync_infer(frame_paths: list[Path], prompt: str, max_tokens: int) -> str:
     messages = [
         _edgellm.Message("system", [_edgellm.MessageContent("text", SYSTEM_PROMPT)]),
     ]
@@ -188,30 +143,24 @@ def _sync_vlm_infer(frame_paths: list[Path], prompt: str, max_tokens: int) -> st
     contents.append(_edgellm.MessageContent("text", prompt))
     messages.append(_edgellm.Message("user", contents))
 
-    kwargs = _build_gen_kwargs([messages], max_tokens, TEMPERATURE, TOP_P, TOP_K)
+    kwargs = dict(
+        batch_messages=[messages],
+        temperature=TEMPERATURE,
+        max_generate_length=max_tokens,
+        top_p=TOP_P,
+        top_k=TOP_K,
+        apply_chat_template=True,
+        add_generation_prompt=True,
+    )
 
-    log.info("VLM 추론 시작 | 이미지=%d장 | max_tokens=%d", len(frame_paths), max_tokens)
+    log.info("추론 시작 | 이미지=%d장 | max_tokens=%d", len(frame_paths), max_tokens)
     response = _runtime.handle_request(_edgellm.create_generation_request(**kwargs))
     raw = response.output_texts[0] if response.output_texts else ""
-    log.info("VLM 추론 완료 | 출력길이=%d | 원문=%s", len(raw), raw[:200])
+    log.info("추론 완료 | 출력길이=%d | 원문=%s", len(raw), raw[:300])
     return raw
 
 
-def _sync_llm_infer(prompt: str, max_tokens: int) -> str:
-    messages = [
-        _edgellm.Message("system", [_edgellm.MessageContent("text", SYSTEM_PROMPT)]),
-        _edgellm.Message("user", [_edgellm.MessageContent("text", prompt)]),
-    ]
-    kwargs = _build_gen_kwargs([messages], max_tokens, TEMPERATURE, TOP_P, TOP_K)
-
-    log.info("LLM 추론 시작 | max_tokens=%d", max_tokens)
-    response = _runtime.handle_request(_edgellm.create_generation_request(**kwargs))
-    raw = response.output_texts[0] if response.output_texts else ""
-    log.info("LLM 추론 완료 | 출력길이=%d | 원문=%s", len(raw), raw[:300])
-    return raw
-
-
-def _parse_llm_json(text: str) -> dict:
+def _parse_json(text: str) -> dict:
     text = text.strip()
     start = text.find("{")
     end = text.rfind("}")
@@ -241,10 +190,6 @@ async def analyze(req: AnalyzeRequest):
 
     frames = select_frames(all_frames, NUM_FRAMES)
 
-    vlm_prompt = VLM_PROMPT_BASE
-    if req.focus:
-        vlm_prompt += VLM_FOCUS_PREFIX + req.focus
-
     actions = (
         [a.model_dump() for a in req.detect_actions]
         if req.detect_actions
@@ -252,86 +197,27 @@ async def analyze(req: AnalyzeRequest):
     )
     detect_items = "\n".join(f'- {a["key"]}: {a["label"]}' for a in actions)
 
-    request_id = str(uuid.uuid4())[:8]
-    log.info(
-        "analyze 시작 | req=%s | 폴더=%s | 전체=%d → 선택=%d | focus=%s",
-        request_id, req.dir_path, len(all_frames), len(frames),
-        req.focus or "(없음)",
-    )
-    t0 = time.perf_counter()
-
-    async with _lock:
-        vlm_output = await asyncio.to_thread(
-            _sync_vlm_infer, frames, vlm_prompt, VLM_MAX_TOKENS,
-        )
-        log.info("analyze VLM 완료 | req=%s | 설명길이=%d", request_id, len(vlm_output))
-
-        llm_prompt = LLM_PROMPT_TEMPLATE.format(
-            vlm_output=vlm_output, detect_items=detect_items,
-        )
-        llm_output = await asyncio.to_thread(
-            _sync_llm_infer, llm_prompt, LLM_MAX_TOKENS,
-        )
-    log.info("analyze LLM 완료 | req=%s | 응답=%s", request_id, llm_output.strip())
-
-    elapsed = time.perf_counter() - t0
-    result = _parse_llm_json(llm_output)
-
-    return AnalyzeResponse(
-        request_id=request_id,
-        action=result.get("action", ""),
-        tts_message=result.get("tts_message", ""),
-        vlm_description=vlm_output,
-        elapsed_sec=round(elapsed, 3),
-    )
-
-
-@app.post("/v1/analyze", response_model=V1AnalyzeResponse)
-async def v1_analyze(req: AnalyzeRequest):
-    """1패스: VLM이 이미지를 보고 바로 JSON 출력. 추론 1회."""
-    folder = Path(req.dir_path)
-    if not folder.is_dir():
-        raise HTTPException(
-            status_code=400, detail=f"폴더가 존재하지 않습니다: {req.dir_path}"
-        )
-
-    all_frames = collect_frames(folder)
-    if len(all_frames) < NUM_FRAMES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"프레임이 {NUM_FRAMES}장 미만입니다 (발견: {len(all_frames)}장)",
-        )
-
-    frames = select_frames(all_frames, NUM_FRAMES)
-
-    actions = (
-        [a.model_dump() for a in req.detect_actions]
-        if req.detect_actions
-        else DEFAULT_DETECT_ACTIONS
-    )
-    detect_items = "\n".join(f'- {a["key"]}: {a["label"]}' for a in actions)
-
-    prompt = V1_PROMPT_TEMPLATE.format(detect_items=detect_items)
+    prompt = PROMPT_TEMPLATE.format(detect_items=detect_items)
     if req.focus:
         prompt += "\n특히 주의: " + req.focus
 
     request_id = str(uuid.uuid4())[:8]
     log.info(
-        "v1/analyze 시작 | req=%s | 폴더=%s | 프레임=%d | focus=%s",
+        "analyze 시작 | req=%s | 폴더=%s | 프레임=%d | focus=%s",
         request_id, req.dir_path, len(frames), req.focus or "(없음)",
     )
     t0 = time.perf_counter()
 
     async with _lock:
         raw = await asyncio.to_thread(
-            _sync_vlm_infer, frames, prompt, V1_MAX_TOKENS,
+            _sync_infer, frames, prompt, MAX_TOKENS,
         )
 
     elapsed = time.perf_counter() - t0
-    log.info("v1/analyze 완료 | req=%s | %.2fs | 응답=%s", request_id, elapsed, raw.strip())
+    log.info("analyze 완료 | req=%s | %.2fs | 응답=%s", request_id, elapsed, raw.strip())
 
-    result = _parse_llm_json(raw)
-    return V1AnalyzeResponse(
+    result = _parse_json(raw)
+    return AnalyzeResponse(
         request_id=request_id,
         action=result.get("action", ""),
         tts_message=result.get("tts_message", ""),
@@ -341,7 +227,7 @@ async def v1_analyze(req: AnalyzeRequest):
 
 @app.post("/debug/analyze_raw")
 async def debug_analyze_raw(req: AnalyzeRequest):
-    """추론 없이 런타임에 전달될 요청 구조만 반환. 직접 실행 JSON과 diff 비교용."""
+    """추론 없이 런타임에 전달될 요청 구조만 반환."""
     folder = Path(req.dir_path)
     if not folder.is_dir():
         raise HTTPException(status_code=400, detail=f"폴더 없음: {req.dir_path}")
@@ -355,56 +241,36 @@ async def debug_analyze_raw(req: AnalyzeRequest):
 
     frames = select_frames(all_frames, NUM_FRAMES)
 
-    vlm_prompt = VLM_PROMPT_BASE
-    if req.focus:
-        vlm_prompt += VLM_FOCUS_PREFIX + req.focus
-
     actions = (
         [a.model_dump() for a in req.detect_actions]
         if req.detect_actions
         else DEFAULT_DETECT_ACTIONS
     )
     detect_items = "\n".join(f'- {a["key"]}: {a["label"]}' for a in actions)
-    llm_prompt_preview = LLM_PROMPT_TEMPLATE.format(
-        vlm_output="<VLM 출력이 여기에 들어감>", detect_items=detect_items,
-    )
 
-    vlm_request = {
-        "batch_size": 1,
-        "temperature": TEMPERATURE,
-        "top_p": TOP_P,
-        "top_k": TOP_K,
-        "max_generate_length": VLM_MAX_TOKENS,
-        "requests": [{
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": [
-                    *[{"type": "image", "image": str(p)} for p in frames],
-                    {"type": "text", "text": vlm_prompt},
-                ]},
-            ]
-        }],
-    }
-
-    llm_request = {
-        "batch_size": 1,
-        "temperature": TEMPERATURE,
-        "top_p": TOP_P,
-        "top_k": TOP_K,
-        "max_generate_length": LLM_MAX_TOKENS,
-        "requests": [{
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": llm_prompt_preview},
-            ]
-        }],
-    }
+    prompt = PROMPT_TEMPLATE.format(detect_items=detect_items)
+    if req.focus:
+        prompt += "\n특히 주의: " + req.focus
 
     return {
         "frames_found": len(all_frames),
         "frames_selected": [str(f) for f in frames],
-        "vlm_request": vlm_request,
-        "llm_request": llm_request,
+        "request": {
+            "batch_size": 1,
+            "temperature": TEMPERATURE,
+            "top_p": TOP_P,
+            "top_k": TOP_K,
+            "max_generate_length": MAX_TOKENS,
+            "requests": [{
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": [
+                        *[{"type": "image", "image": str(p)} for p in frames],
+                        {"type": "text", "text": prompt},
+                    ]},
+                ]
+            }],
+        },
     }
 
 
