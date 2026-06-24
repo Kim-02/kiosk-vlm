@@ -298,7 +298,7 @@ async def analyze_fist(req: AnalyzeRequest):
     detected = "주먹" in desc
     return FistResponse(
         request_id=request_id,
-        description=desc,
+        description=desc if detected else "",
         action="hat_action" if detected else "",
         tts_message="안전 이상이 발생되었습니다." if detected else "",
         elapsed_sec=round(elapsed, 3),
