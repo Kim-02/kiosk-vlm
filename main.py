@@ -43,7 +43,13 @@ DETECT_PROMPT = (
     "- 각 사람이 무엇을 하고 있는지\n"
     "- 헬멧, 안전장비 착용 여부\n"
     "- 사다리, 위험 구역, 장비 접촉 등 위험 요소가 있는지\n"
-    "보이는 것만 서술하라. 추측하지 마라."
+    "보이는 것만 서술하라. 추측하지 마라.\n\n"
+    "서술 후 아래 4가지 위반을 JSON으로 보고하라. 해당 없으면 false.\n"
+    "hat: 안전모를 안 쓴 사람이 보이면 true\n"
+    "speaker: 스피커를 만지는 사람이 보이면 true\n"
+    "ladder: 사다리를 혼자 타는 사람이 보이면 true\n"
+    "tape: 위험 테이프를 넘는 사람이 보이면 true\n\n"
+    '예시: {"hat":false,"speaker":false,"ladder":false,"tape":false}'
 )
 
 # ── 런타임 ────────────────────────────────────────────────────────────────────
@@ -92,6 +98,11 @@ class AnalyzeRequest(BaseModel):
 class AnalyzeResponse(BaseModel):
     request_id: str
     description: str
+    hat: bool
+    speaker: bool
+    ladder: bool
+    tape: bool
+    tts_message: str
     elapsed_sec: float
 
 
@@ -173,51 +184,41 @@ def _run_vlm(
     return raw
 
 
-ACTION_KEYS = ["hat_action", "touch_action", "dangerInOut_action", "ladder_action"]
+DETECT_KEYS = ["hat", "speaker", "ladder", "tape"]
 
-ACTION_TTS = {
-    "hat_action": "헬멧을 착용하십시오",
-    "touch_action": "스피커에서 손을 떼십시오",
-    "dangerInOut_action": "위험 구역에서 벗어나십시오",
-    "ladder_action": "사다리에서 내려오십시오. 혼자 사다리 작업은 금지입니다",
-}
-
-EMPTY_RESULT = {
-    "person_count": 0,
-    "hat_action": 0, "touch_action": 0, "dangerInOut_action": 0, "ladder_action": 0,
-    "description": "",
-    "tts_message": "",
+DETECT_TTS = {
+    "hat": "안전모를 착용하십시오",
+    "speaker": "스피커에서 손을 떼십시오",
+    "ladder": "사다리에서 내려오십시오. 혼자 사다리 작업은 금지입니다",
+    "tape": "위험 구역에서 벗어나십시오",
 }
 
 
-def _parse_and_validate(text: str) -> dict:
+def _parse_response(text: str) -> dict:
     text = text.strip()
+
     start = text.find("{")
     end = text.rfind("}")
-    if start == -1 or end == -1:
-        return EMPTY_RESULT.copy()
 
-    try:
-        data = json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return EMPTY_RESULT.copy()
+    description = text[:start].strip() if start > 0 else text if start == -1 else ""
 
-    person_count = max(int(data.get("person_count", 0)), 0)
+    flags = {k: False for k in DETECT_KEYS}
+    if start != -1 and end != -1:
+        try:
+            data = json.loads(text[start : end + 1])
+            for k in DETECT_KEYS:
+                v = data.get(k, False)
+                flags[k] = v is True or v == "true"
+        except json.JSONDecodeError:
+            pass
+        if not description:
+            description = text[:start].strip()
 
-    counts = {}
-    for k in ACTION_KEYS:
-        v = data.get(k, 0)
-        counts[k] = max(int(v), 0) if isinstance(v, (int, float, str)) and str(v).isdigit() else 0
-
-    tts_parts = []
-    for k in ACTION_KEYS:
-        if counts[k] > 0:
-            tts_parts.append(f"{ACTION_TTS[k]} ({counts[k]}명)")
+    tts_parts = [DETECT_TTS[k] for k in DETECT_KEYS if flags[k]]
 
     return {
-        "person_count": person_count,
-        **counts,
-        "description": str(data.get("description", "")),
+        "description": description,
+        **flags,
         "tts_message": ", ".join(tts_parts),
     }
 
@@ -250,9 +251,15 @@ async def analyze(req: AnalyzeRequest):
     elapsed = time.perf_counter() - t0
     log.info("analyze 완료 | req=%s | %.2fs | 응답=%s", request_id, elapsed, raw.strip())
 
+    result = _parse_response(raw)
     return AnalyzeResponse(
         request_id=request_id,
-        description=raw.strip(),
+        description=result["description"],
+        hat=result["hat"],
+        speaker=result["speaker"],
+        ladder=result["ladder"],
+        tape=result["tape"],
+        tts_message=result["tts_message"],
         elapsed_sec=round(elapsed, 3),
     )
 
