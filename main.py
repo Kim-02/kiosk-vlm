@@ -77,6 +77,13 @@ PROMPT_TAPE = (
     "보이는 것만 서술하라. 추측하지 마라."
 )
 
+PROMPT_FIST = (
+    "이 연속 프레임은 작업 현장 CCTV 영상이다.\n"
+    "프레임에 보이는 사람들의 손을 집중해서 관찰하라.\n"
+    "주먹을 쥐고 있는 사람이 있는지 확인하라.\n"
+    "보이는 것만 서술하라. 추측하지 마라."
+)
+
 # ── 런타임 ────────────────────────────────────────────────────────────────────
 _runtime: Any = None
 _edgellm: Any = None
@@ -262,6 +269,12 @@ async def analyze_ladder(req: AnalyzeRequest):
 async def analyze_tape(req: AnalyzeRequest):
     """위험 테이프 넘기 탐지"""
     return await _analyze(req, PROMPT_TAPE, "analyze/tape")
+
+
+@app.post("/analyze/fist", response_model=AnalyzeResponse)
+async def analyze_fist(req: AnalyzeRequest):
+    """주먹 쥔 사람 탐지 → hat_action"""
+    return await _analyze(req, PROMPT_FIST, "analyze/fist")
 
 
 # ── 디버그 ───────────────────────────────────────────────────────────────────
