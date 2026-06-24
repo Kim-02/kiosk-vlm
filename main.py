@@ -155,11 +155,14 @@ def _resize_frames(frame_paths: list[Path]) -> list[str]:
     return resized
 
 
-def _sync_infer(frame_paths: list[Path], prompt: str, max_tokens: int) -> str:
+def _sync_infer(
+    frame_paths: list[Path], prompt: str, max_tokens: int,
+    system_prompt: str = SYSTEM_PROMPT,
+) -> str:
     image_paths = _resize_frames(frame_paths)
 
     messages = [
-        _edgellm.Message("system", [_edgellm.MessageContent("text", SYSTEM_PROMPT)]),
+        _edgellm.Message("system", [_edgellm.MessageContent("text", system_prompt)]),
     ]
     contents = [_edgellm.MessageContent("image", p) for p in image_paths]
     contents.append(_edgellm.MessageContent("text", prompt))
@@ -350,11 +353,14 @@ async def v1_debug(req: DebugRequest):
         )
 
     frames = select_frames(all_frames, NUM_FRAMES)
-    prompt = "이 화면을 설명해라 (한국어로)."
+    prompt = "이 이미지들에 무엇이 보이는지 설명하라."
 
     t0 = time.perf_counter()
     async with _lock:
-        raw = await asyncio.to_thread(_sync_infer, frames, prompt, 256)
+        raw = await asyncio.to_thread(
+            _sync_infer, frames, prompt, 256,
+            system_prompt="Describe what you see in the images. Answer in Korean.",
+        )
     elapsed = time.perf_counter() - t0
 
     return {
