@@ -166,11 +166,37 @@ def _resize_frames(frame_paths: list[Path]) -> list[str]:
     return resized
 
 
+def _show_debug_frames(image_paths: list[str]) -> None:
+    """리사이즈된 15장을 HTML로 만들어 브라우저에 2초간 표시."""
+    import base64, subprocess
+    imgs_html = ""
+    for p in image_paths:
+        with open(p, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        imgs_html += f'<img src="data:image/jpeg;base64,{b64}" style="width:140px;height:140px;margin:2px;">\n'
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>VLM Debug Frames</title></head>
+<body style="background:#111;margin:10px;">
+<h3 style="color:#fff;">VLM 입력 프레임 ({len(image_paths)}장)</h3>
+<div style="display:flex;flex-wrap:wrap;">{imgs_html}</div>
+<script>setTimeout(()=>window.close(),2500);</script>
+</body></html>"""
+
+    html_path = Path("/tmp/vlm_debug_frames.html")
+    html_path.write_text(html)
+    try:
+        subprocess.Popen(["xdg-open", str(html_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        log.warning("브라우저 열기 실패: %s", html_path)
+
+
 def _sync_infer(
     frame_paths: list[Path], prompt: str, max_tokens: int,
     system_prompt: str = SYSTEM_PROMPT,
 ) -> str:
     image_paths = _resize_frames(frame_paths)
+    _show_debug_frames(image_paths)
 
     messages = [
         _edgellm.Message("system", [_edgellm.MessageContent("text", system_prompt)]),
