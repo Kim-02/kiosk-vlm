@@ -351,23 +351,21 @@ class DebugRequest(BaseModel):
 
 @app.post("/v1/debug")
 async def v1_debug(req: DebugRequest):
-    """system 없음, 프롬프트 최소. VLM이 이미지를 실제로 보는지 확인."""
+    """이미지 1장만, 리사이즈 없이, 원본 경로 그대로 pybind에 전달. 최소 테스트."""
     folder = Path(req.dir_path)
     if not folder.is_dir():
         raise HTTPException(status_code=400, detail=f"폴더 없음: {req.dir_path}")
 
     all_frames = collect_frames(folder)
-    if len(all_frames) < NUM_FRAMES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"프레임 {NUM_FRAMES}장 미만 (발견: {len(all_frames)}장)",
-        )
+    if not all_frames:
+        raise HTTPException(status_code=400, detail="프레임 없음")
 
-    frames = select_frames(all_frames, NUM_FRAMES)
-    image_paths = _resize_frames(frames)
+    test_image = str(all_frames[0])
 
-    contents = [_edgellm.MessageContent("image", p) for p in image_paths]
-    contents.append(_edgellm.MessageContent("text", "Describe what you see."))
+    contents = [
+        _edgellm.MessageContent("image", test_image),
+        _edgellm.MessageContent("text", "Describe what you see."),
+    ]
 
     request = _edgellm.create_generation_request(
         batch_messages=[[_edgellm.Message("user", contents)]],
@@ -388,7 +386,7 @@ async def v1_debug(req: DebugRequest):
 
     return {
         "description": raw,
-        "image_paths": image_paths,
+        "test_image": test_image,
         "elapsed_sec": round(elapsed, 3),
     }
 
