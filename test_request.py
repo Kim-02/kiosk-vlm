@@ -237,6 +237,7 @@ def run(video_path: str, frames_dir: str) -> None:
         worker: threading.Thread | None = None
         buffer: list[Path] = []
         i = 0
+        window_seen = False  # 창이 실제로 떠서 보인 적이 있는지 (조기 종료 방지)
         while True:
             img = cv2.imread(str(paths[i]))
             if img is not None:
@@ -259,7 +260,11 @@ def run(video_path: str, frames_dir: str) -> None:
             key = cv2.waitKey(delay) & 0xFF
             if key in (27, ord("q")):
                 break
-            if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+            # 창 닫힘(X) 감지: 한 번 보인 뒤에만 적용. 속성 미지원(-1) 빌드에서는 무시.
+            prop = cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE)
+            if prop >= 1:
+                window_seen = True
+            elif window_seen and prop == 0:
                 break
 
             i += 1
