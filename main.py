@@ -82,6 +82,14 @@ CHECK_PROMPT = (
     "화면에 보이는걸 모두 설명해라."
 )
 
+# ── 설명 전용(디버그) 시스템 프롬프트 ────────────────────────────────────────
+# 안전판정/참조표와 무관하게, 보이는 장면을 있는 그대로만 묘사하도록 한다.
+DESCRIBE_SYSTEM_PROMPT = (
+    "당신은 영상 장면을 객관적으로 묘사하는 도우미입니다. "
+    "이미지들은 시간 순서대로 이어진 연속 프레임입니다. "
+    "위험/안전을 판정하지 말고, 화면에 실제로 보이는 것만 한국어로 설명하세요."
+)
+
 # ── 런타임 ────────────────────────────────────────────────────────────────────
 _runtime: Any = None
 _edgellm: Any = None
@@ -193,21 +201,27 @@ def _resize_frame(src: Path, sub: str = "default") -> str:
     return str(out)
 
 
-def _run_vlm(frame_paths: list[Path], prompt: str, sub: str) -> str:
-    """참조 이미지(있으면) + 판정 프레임을 함께 입력해 추론."""
+def _run_vlm(
+    frame_paths: list[Path],
+    prompt: str,
+    sub: str,
+    system_prompt: str = SYSTEM_PROMPT,
+    use_reference: bool = True,
+) -> tuple[str, list[str]]:
+    """프레임(+선택적 참조 이미지)을 입력해 추론. (raw, 입력이미지경로목록) 반환."""
     cfg = cfg_module.get()
     resized = [_resize_frame(p, sub) for p in frame_paths]
 
     # 참조 이미지를 맨 앞에 붙인다 (시스템/프롬프트에서 '첫 번째 이미지'로 지칭)
     all_image_paths: list[str] = []
-    if _reference_resized:
+    if use_reference and _reference_resized:
         all_image_paths.append(_reference_resized)
     all_image_paths.extend(resized)
 
     image_buffers = [_edgellm.load_image_from_path(rp) for rp in all_image_paths]
 
     messages = [
-        _edgellm.Message("system", [_edgellm.MessageContent("text", SYSTEM_PROMPT)]),
+        _edgellm.Message("system", [_edgellm.MessageContent("text", system_prompt)]),
     ]
     contents = [_edgellm.MessageContent("image", rp) for rp in all_image_paths]
     contents.append(_edgellm.MessageContent("text", prompt))
@@ -290,7 +304,7 @@ def _inspect_images(paths: list[str]) -> list[dict]:
 def _build_tts(labels: list[str]) -> str:
     """감지된 행동들의 제지 문구를 LABELS 순서대로 이어붙인다."""
     if not labels:
-        return ""
+        return "안전 이상이 없습니다."
     ordered = [lb for lb in LABELS if lb in labels]
     phrases = [TTS_PHRASE[lb] for lb in ordered]
     return "안전 이상이 발생했습니다. " + " ".join(phrases)
@@ -348,24 +362,25 @@ async def analyze(req: AnalyzeRequest):
 # ── 디버그 ───────────────────────────────────────────────────────────────────
 @app.post("/v1/debug")
 async def v1_debug(req: AnalyzeRequest):
-    """판정 프롬프트 그대로, 파싱 전 원문 확인용."""
+    """안전판정 없이, 프레임에 보이는 장면을 그대로 설명만 한다."""
     frames = _validate_and_select(req.dir_path)
     request_id = str(uuid.uuid4())[:8]
 
     t0 = time.perf_counter()
     async with _lock:
-        raw, image_paths = await asyncio.to_thread(_run_vlm, frames, CHECK_PROMPT, request_id)
+        # 참조표/안전판정 시스템 프롬프트를 쓰지 않고, 중립적 설명만 수행
+        raw, image_paths = await asyncio.to_thread(
+            _run_vlm, frames, CHECK_PROMPT, request_id, DESCRIBE_SYSTEM_PROMPT, False,
+        )
     elapsed = time.perf_counter() - t0
 
     images = await asyncio.to_thread(_inspect_images, image_paths)
 
     return {
         "request_id": request_id,
-        "raw": raw,
-        "parsed": _parse_detections(raw),
+        "description": raw.strip(),
         "frames_used": [str(f) for f in frames],
-        "reference_used": bool(_reference_resized),
-        # 모델에 실제로 입력된 이미지(참조 1장 + 프레임들). 리사이즈 후 경로/크기/로드여부.
+        # 모델에 실제로 입력된 프레임들(리사이즈 후 경로/크기/로드여부). 디버그에선 참조 미사용.
         "images_fed": images,
         "elapsed_sec": round(elapsed, 3),
     }
