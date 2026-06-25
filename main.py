@@ -126,6 +126,12 @@ class AnalyzeRequest(BaseModel):
     dir_path: str
 
 
+class VLMRequest(BaseModel):
+    image_path: str
+    prompt: str
+    system_prompt: str | None = None
+
+
 class Detection(BaseModel):
     label: str
     confidence: float
@@ -365,6 +371,45 @@ async def v1_debug(req: AnalyzeRequest):
         "frames_used": [str(f) for f in frames],
         # 모델에 실제로 입력된 프레임들(리사이즈 후 경로/크기/로드여부). 디버그에선 참조 미사용.
         "images_fed": images,
+        "elapsed_sec": round(elapsed, 3),
+    }
+
+
+@app.post("/vlm")
+async def vlm(req: VLMRequest):
+    """사진 한 장 경로 + 프롬프트를 받아 VLM 응답을 그대로 반환한다.
+
+    참조표/안전판정 로직을 거치지 않고, 입력 이미지와 프롬프트만으로 추론한다.
+    system_prompt를 지정하지 않으면 중립적 설명 프롬프트를 사용한다.
+    """
+    path = Path(req.image_path)
+    if not path.is_file():
+        raise HTTPException(status_code=400, detail=f"이미지가 존재하지 않습니다: {req.image_path}")
+    if path.suffix.lower() not in FRAME_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"지원하지 않는 이미지 형식입니다: {path.suffix} (지원: {sorted(FRAME_EXTS)})",
+        )
+
+    request_id = str(uuid.uuid4())[:8]
+    system_prompt = req.system_prompt or DESCRIBE_SYSTEM_PROMPT
+
+    log.info("vlm 시작 | req=%s | 이미지=%s", request_id, req.image_path)
+    t0 = time.perf_counter()
+
+    async with _lock:
+        raw, image_paths = await asyncio.to_thread(
+            _run_vlm, [path], req.prompt, request_id, system_prompt, False,
+        )
+    elapsed = time.perf_counter() - t0
+
+    log.info("vlm 완료 | req=%s | %.2fs", request_id, elapsed)
+
+    return {
+        "request_id": request_id,
+        "response": raw.strip(),
+        "image": str(path),
+        "image_fed": image_paths[0] if image_paths else None,
         "elapsed_sec": round(elapsed, 3),
     }
 
