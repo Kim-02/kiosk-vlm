@@ -9,12 +9,11 @@
 """
 import json
 import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
-
-import cv2
 
 BASE_URL = "http://localhost:8000"
 
@@ -23,15 +22,7 @@ FRAMES_DIR = "/home/ds/Desktop/kiosk-vlm/frames"
 TARGET_FPS = 30.0
 
 
-def extract_frames(video_path: str, frames_dir: str, target_fps: float = TARGET_FPS) -> int:
-    """영상을 읽어 target_fps 간격으로 frame_0001.jpg 형식으로 저장한다.
-
-    기존 frame_*.jpg 는 모두 지우고 새로 채운다. 저장한 프레임 수를 반환한다.
-    """
-    src = Path(video_path)
-    if not src.is_file():
-        raise FileNotFoundError(f"영상을 찾을 수 없습니다: {video_path}")
-
+def _prepare_dir(frames_dir: str) -> Path:
     out_dir = Path(frames_dir)
     if out_dir.exists():
         # 이전 프레임 정리 (frame_*.jpg 만 제거)
@@ -39,15 +30,34 @@ def extract_frames(video_path: str, frames_dir: str, target_fps: float = TARGET_
             old.unlink()
     else:
         out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
+def _extract_with_ffmpeg(video_path: str, out_dir: Path, target_fps: float) -> int:
+    """ffmpeg 로 영상 전체를 target_fps 로 frame_0001.jpg 형식으로 저장."""
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-i", video_path,
+        "-vf", f"fps={target_fps:g}",
+        "-q:v", "2",
+        "-start_number", "1",
+        str(out_dir / "frame_%04d.jpg"),
+    ]
+    subprocess.run(cmd, check=True)
+    return len(list(out_dir.glob("frame_*.jpg")))
+
+
+def _extract_with_cv2(video_path: str, out_dir: Path, target_fps: float) -> int:
+    """ffmpeg 가 없을 때의 폴백. OpenCV 로 영상 전체를 순회한다."""
+    import cv2
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"영상을 열 수 없습니다: {video_path}")
 
     native_fps = cap.get(cv2.CAP_PROP_FPS) or target_fps
-    # 원본이 target_fps 보다 느리면 모든 프레임을 저장
-    step = max(native_fps / target_fps, 1.0)
-    print(f"영상 FPS={native_fps:.2f} → 추출 FPS={target_fps:.0f} (step={step:.2f})")
+    step = max(native_fps / target_fps, 1.0)  # 원본이 더 느리면 모든 프레임 저장
+    print(f"  영상 FPS={native_fps:.2f} → 추출 FPS={target_fps:.0f} (step={step:.2f})")
 
     saved = 0
     next_capture = 0.0
@@ -58,12 +68,30 @@ def extract_frames(video_path: str, frames_dir: str, target_fps: float = TARGET_
             break
         if idx >= next_capture:
             saved += 1
-            out = out_dir / f"frame_{saved:04d}.jpg"
-            cv2.imwrite(str(out), frame)
+            cv2.imwrite(str(out_dir / f"frame_{saved:04d}.jpg"), frame)
             next_capture += step
         idx += 1
-
     cap.release()
+    return saved
+
+
+def extract_frames(video_path: str, frames_dir: str, target_fps: float = TARGET_FPS) -> int:
+    """영상 전체를 target_fps 로 추출한다. ffmpeg 우선, 없으면 OpenCV 폴백.
+
+    기존 frame_*.jpg 는 모두 지우고 새로 채운다. 저장한 프레임 수를 반환한다.
+    """
+    if not Path(video_path).is_file():
+        raise FileNotFoundError(f"영상을 찾을 수 없습니다: {video_path}")
+
+    out_dir = _prepare_dir(frames_dir)
+
+    if shutil.which("ffmpeg"):
+        print("ffmpeg 로 프레임 추출 중...")
+        saved = _extract_with_ffmpeg(video_path, out_dir, target_fps)
+    else:
+        print("ffmpeg 없음 → OpenCV 로 프레임 추출 중...")
+        saved = _extract_with_cv2(video_path, out_dir, target_fps)
+
     print(f"프레임 추출 완료: {saved}장 → {out_dir}")
     return saved
 
