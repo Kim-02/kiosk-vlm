@@ -78,6 +78,9 @@ DETECT_PROMPT = (
     "확실하지 않은 행동은 detections에 넣지 마라."
 )
 
+CHECK_PROMPT = (
+    "화면에 보이는걸 모두 설명해라."
+)
 
 # ── 런타임 ────────────────────────────────────────────────────────────────────
 _runtime: Any = None
@@ -351,7 +354,7 @@ async def v1_debug(req: AnalyzeRequest):
 
     t0 = time.perf_counter()
     async with _lock:
-        raw, image_paths = await asyncio.to_thread(_run_vlm, frames, DETECT_PROMPT, request_id)
+        raw, image_paths = await asyncio.to_thread(_run_vlm, frames, CHECK_PROMPT, request_id)
     elapsed = time.perf_counter() - t0
 
     images = await asyncio.to_thread(_inspect_images, image_paths)
