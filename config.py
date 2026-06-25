@@ -28,10 +28,11 @@ class AppConfig(BaseModel):
     RESIZE_TMP_DIR: str = "/tmp/vlm_resized"
 
     # ── 샘플링 파라미터 ──────────────────────────────────────────────────────
+    # TEMPERATURE=0.0(그리디)일 때는 TOP_P=1.0, TOP_K=1 이어야 경고/수치 불안정이 없다.
     MAX_TOKENS: int = 384
     TEMPERATURE: float = 0.0
-    TOP_P: float = 0.9
-    TOP_K: int = 50
+    TOP_P: float = 1.0
+    TOP_K: int = 1
 
     # ── 행동별 알림 임계값. 오탐 잦으면 올리고 미탐 잦으면 내린다. ───────────
     CONFIDENCE_THRESHOLD: dict[str, float] = Field(
