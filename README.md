@@ -284,7 +284,7 @@ curl -X POST "http://localhost:8000/infer" \
 
 ---
 
-### GET `http://localhost:8000/config/status`
+### GET `http://localhost:8000/config`
 
 현재 서버에 적용된 설정값 전체를 조회합니다.
 
@@ -295,41 +295,78 @@ curl -X POST "http://localhost:8000/infer" \
   "ENGINE_DIR": "/media/ds/DATA/engines/qwen25-vl-7b-4k-b1-10x448",
   "PLUGIN_PATH": "/home/ds/edge_llm/TensorRT-Edge-LLM/build/libNvInfer_edgellm_plugin.so",
   "EDGELLM_PYBIND_DIR": "/home/ds/edge_llm/TensorRT-Edge-LLM/experimental/pybind/build",
-  "MAX_TOKENS": 128,
+  "REFERENCE_IMAGE_PATH": "/mnt/user-data/uploads/ChatGPT_Image_2026년_6월_25일_오후_02_19_27.png",
+  "NUM_FRAMES": 15,
+  "FRAME_SIZE": 448,
+  "JPEG_QUALITY": 95,
+  "RESIZE_TMP_DIR": "/tmp/vlm_resized",
+  "MAX_TOKENS": 384,
   "TEMPERATURE": 0.0,
-  "DEFAULT_PROMPT": "다음 이미지들은 시간 순서대로 입력된 연속 프레임입니다. 사용자가 요청한 기준에 따라 장면의 변화와 주요 행동을 간결하게 설명하세요.",
-  "NUM_WORKERS": 4
+  "TOP_P": 0.9,
+  "TOP_K": 50,
+  "CONFIDENCE_THRESHOLD": {
+    "helmet_off": 0.6,
+    "cone_touch": 0.6,
+    "fence_crossing": 0.6,
+    "ladder_alone": 0.6
+  },
+  "HOST": "0.0.0.0",
+  "PORT": 8000
 }
+```
+
+**curl 예시**
+
+```bash
+curl "http://localhost:8000/config"
 ```
 
 ---
 
-### PATCH `http://localhost:8000/config`
+### PUT `http://localhost:8000/config`
 
-변경할 필드만 포함해서 전송합니다. 변경 내용은 `config.json`에 저장되어 재시작 후에도 유지됩니다.
+변경할 필드만 포함해서 전송하는 **부분 업데이트**입니다. 변경 내용은 `config.json`에 저장되어 재시작 후에도 유지되며, 갱신된 설정 전체를 응답으로 돌려줍니다.
 
-**즉시 적용:** `MAX_TOKENS`, `TEMPERATURE`, `DEFAULT_PROMPT`  
-**즉시 적용 (워커 추가 시):** `NUM_WORKERS` 증가  
-**재시작 후 적용:** `ENGINE_DIR`, `PLUGIN_PATH`, `EDGELLM_PYBIND_DIR`, `NUM_WORKERS` 감소
+- **즉시 적용** (다음 요청부터 반영): `NUM_FRAMES`, `FRAME_SIZE`, `JPEG_QUALITY`, `RESIZE_TMP_DIR`, `MAX_TOKENS`, `TEMPERATURE`, `TOP_P`, `TOP_K`, `CONFIDENCE_THRESHOLD`
+- **재시작 후 적용** (시작 시 1회 사용): `ENGINE_DIR`, `PLUGIN_PATH`, `EDGELLM_PYBIND_DIR`, `REFERENCE_IMAGE_PATH`, `HOST`, `PORT`
+- `CONFIDENCE_THRESHOLD`는 **라벨 단위로 병합**됩니다. 일부 라벨만 보내면 나머지 라벨 임계값은 그대로 유지됩니다.
+- 알 수 없는 키나 타입이 맞지 않는 값은 `400` 에러로 거부됩니다.
 
-**Request Body**
+**Request Body** (예: 출력 토큰을 늘리고 안전모 임계값만 올림)
 
 ```json
 {
-  "MAX_TOKENS": 32,
-  "DEFAULT_PROMPT": "Classify the action. One word only."
+  "MAX_TOKENS": 512,
+  "CONFIDENCE_THRESHOLD": {
+    "helmet_off": 0.8
+  }
 }
 ```
 
-**Response**
+**Response** — 갱신된 설정 전체 (`GET /config`와 동일한 형식)
 
 ```json
 {
-  "config": { "ENGINE_DIR": "...", "MAX_TOKENS": 32, "..." : "..." },
-  "workers_added": 0,
-  "restart_required": false,
-  "message": "설정이 즉시 적용됐습니다."
+  "MAX_TOKENS": 512,
+  "CONFIDENCE_THRESHOLD": {
+    "helmet_off": 0.8,
+    "cone_touch": 0.6,
+    "fence_crossing": 0.6,
+    "ladder_alone": 0.6
+  },
+  "...": "(나머지 필드 동일)"
 }
+```
+
+**curl 예시**
+
+```bash
+curl -X PUT "http://localhost:8000/config" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "MAX_TOKENS": 512,
+    "CONFIDENCE_THRESHOLD": { "helmet_off": 0.8 }
+  }'
 ```
 
 ---
@@ -348,14 +385,22 @@ curl -X POST "http://localhost:8000/infer" \
 
 ## 설정 파일 (`config.json`)
 
-서버 최초 실행 시 자동 생성됩니다. 직접 수정하거나 `PATCH /config` API로 변경할 수 있습니다.
+서버 최초 실행 시 자동 생성됩니다. 직접 수정하거나 `PUT /config` API로 변경할 수 있습니다. 직접 수정한 경우에는 재시작해야 반영됩니다.
 
 | 키 | 기본값 | 재시작 필요 | 설명 |
 |----|--------|:-----------:|------|
 | `ENGINE_DIR` | `/media/ds/DATA/engines/qwen25-vl-7b-4k-b1-10x448` | ✅ | TensorRT 엔진 경로 |
 | `PLUGIN_PATH` | `.../libNvInfer_edgellm_plugin.so` | ✅ | EdgeLLM 플러그인 경로 |
 | `EDGELLM_PYBIND_DIR` | `.../experimental/pybind/build` | ✅ | Python 바인딩 `.so` 위치 |
-| `MAX_TOKENS` | `128` | ❌ | 최대 출력 토큰 수 (요청값 우선) |
+| `REFERENCE_IMAGE_PATH` | `.../ChatGPT_Image_...png` | ✅ | 참조(few-shot) 콜라주 이미지 경로. 시작 시 1회 리사이즈해 캐시 |
+| `NUM_FRAMES` | `15` | ❌ | 균등 선택할 프레임 수 (이 값 미만이면 400) |
+| `FRAME_SIZE` | `448` | ❌ | 리사이즈 목표 변(긴 쪽 기준) 픽셀 |
+| `JPEG_QUALITY` | `95` | ❌ | 리사이즈 JPEG 저장 품질 (1~100) |
+| `RESIZE_TMP_DIR` | `/tmp/vlm_resized` | ❌ | 리사이즈 결과 캐시 디렉터리 |
+| `MAX_TOKENS` | `384` | ❌ | 최대 출력 토큰 수 |
 | `TEMPERATURE` | `0.0` | ❌ | 샘플링 온도 (0.0 = 결정론적) |
-| `DEFAULT_PROMPT` | `"다음 이미지들은 시간 순서대로..."` | ❌ | 요청에 prompt 없을 때 사용하는 기본 프롬프트 |
-| `NUM_WORKERS` | `4` | 증가 시 ❌ / 감소 시 ✅ | 동시 처리 워커 수 |
+| `TOP_P` | `0.9` | ❌ | nucleus 샘플링 top-p |
+| `TOP_K` | `50` | ❌ | top-k 샘플링 |
+| `CONFIDENCE_THRESHOLD` | `{helmet_off, cone_touch, fence_crossing, ladder_alone: 0.6}` | ❌ | 라벨별 알림 임계값. 오탐 잦으면 ↑, 미탐 잦으면 ↓ |
+| `HOST` | `0.0.0.0` | ✅ | 바인딩 호스트 |
+| `PORT` | `8000` | ✅ | 바인딩 포트 |
