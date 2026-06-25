@@ -226,7 +226,7 @@ def _run_vlm(frame_paths: list[Path], prompt: str, sub: str) -> str:
     response = _runtime.handle_request(gen_req)
     raw = response.output_texts[0] if response.output_texts else ""
     log.info("추론 완료 | 출력길이=%d | 원문=%s", len(raw), raw[:300])
-    return raw
+    return raw, all_image_paths
 
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -267,6 +267,23 @@ def _parse_detections(raw: str) -> list[dict]:
     return out
 
 
+def _inspect_images(paths: list[str]) -> list[dict]:
+    """모델에 실제 입력된 이미지들의 로드 가능 여부와 크기를 점검."""
+    import cv2
+    info: list[dict] = []
+    for p in paths:
+        img = cv2.imread(p)
+        ok = img is not None
+        info.append({
+            "path": p,
+            "exists": Path(p).is_file(),
+            "loadable": ok,
+            "width": int(img.shape[1]) if ok else None,
+            "height": int(img.shape[0]) if ok else None,
+        })
+    return info
+
+
 def _build_tts(labels: list[str]) -> str:
     """감지된 행동들의 제지 문구를 LABELS 순서대로 이어붙인다."""
     if not labels:
@@ -301,7 +318,7 @@ async def analyze(req: AnalyzeRequest):
     t0 = time.perf_counter()
 
     async with _lock:
-        raw = await asyncio.to_thread(_run_vlm, frames, DETECT_PROMPT, request_id)
+        raw, _ = await asyncio.to_thread(_run_vlm, frames, DETECT_PROMPT, request_id)
 
     elapsed = time.perf_counter() - t0
     dets = _parse_detections(raw)
@@ -334,14 +351,19 @@ async def v1_debug(req: AnalyzeRequest):
 
     t0 = time.perf_counter()
     async with _lock:
-        raw = await asyncio.to_thread(_run_vlm, frames, DETECT_PROMPT, request_id)
+        raw, image_paths = await asyncio.to_thread(_run_vlm, frames, DETECT_PROMPT, request_id)
     elapsed = time.perf_counter() - t0
 
+    images = await asyncio.to_thread(_inspect_images, image_paths)
+
     return {
+        "request_id": request_id,
         "raw": raw,
         "parsed": _parse_detections(raw),
         "frames_used": [str(f) for f in frames],
         "reference_used": bool(_reference_resized),
+        # 모델에 실제로 입력된 이미지(참조 1장 + 프레임들). 리사이즈 후 경로/크기/로드여부.
+        "images_fed": images,
         "elapsed_sec": round(elapsed, 3),
     }
 
