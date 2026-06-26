@@ -228,13 +228,15 @@ def _run_vlm(
     return raw, all_image_paths
 
 
-_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+# 최상위가 객체({...})든 배열([...])이든 잡아낸다.
+_JSON_RE = re.compile(r"[\[{].*[\]}]", re.DOTALL)
 
 
 def _parse_detections(raw: str) -> list[dict]:
     """VLM 출력에서 detections 배열을 JSON 파싱해 그대로 반환.
 
     필터링·검증 같은 후처리는 하지 않고, 파싱된 dict 목록만 돌려준다.
+    모델이 {"detections":[...]} 로 감싸든, 최상위 배열 [...] 로 주든 모두 처리한다.
     JSON을 찾지 못하거나 형식이 맞지 않으면 빈 리스트를 반환한다.
     """
     text = re.sub(r"```(?:json)?", "", raw.strip()).strip()
@@ -248,7 +250,12 @@ def _parse_detections(raw: str) -> list[dict]:
         log.warning("JSON 디코드 실패, 원문=%s", raw[:200])
         return []
 
-    raw_dets = obj.get("detections", [])
+    if isinstance(obj, dict):
+        raw_dets = obj.get("detections", [])
+    elif isinstance(obj, list):
+        raw_dets = obj
+    else:
+        raw_dets = []
     if not isinstance(raw_dets, list):
         return []
 
