@@ -51,25 +51,31 @@ TTS_PHRASE = {
 # ── 시스템 프롬프트 ──────────────────────────────────────────────────────────
 SYSTEM_PROMPT = (
     "You are a factory CCTV safety checker. "
+    "Images are consecutive CCTV frames. Analyze them as one sequence. "
+    "Detect all clearly visible safety violations. Multiple labels may appear at once. "
     "Check only these labels: "
-    "helmet_off=worker without red helmet; "
-    "cone_touch=worker touching orange cone; "
-    "fence_crossing=person on/crossing expandable safety rail; "
-    "ladder_alone=worker alone on green ladder; "
-    "safety_vest=safety hook not above/on red helmet. "
-    "Return JSON only. "
+    "helmet_off=worker head is clearly visible and no red helmet is worn; "
+    "cone_touch=worker hand/body is clearly touching orange cone; "
+    "fence_crossing=person is clearly standing on, stepping on, or crossing expandable safety rail; "
+    "ladder_alone=worker is clearly using/climbing green ladder and no helper is visible nearby; "
+    "safety_vest=red helmet and upper area are clearly visible, but safety hook is not above/on helmet. "
+    "Report a label only when visual evidence is clear. "
+    "Do not infer hidden objects, unseen people, colors, or actions. "
+    "Do not report if blurry, occluded, cropped, or uncertain. "
+    "If a label appears in any frame, report it once. "
+    "Return JSON only, no markdown, no extra text. "
     '{"detections":[{"label":"","evidence":""}]} '
-    "Use only listed label keys. "
-    "Evidence must be very short. "
-    "evidence max 6 words."
-    "Report each label once. "
-    'If none, return {"detections":[]}. '
+    "label must be one listed key. "
+    "Each item must have only label and evidence. "
+    "Evidence must be short and visual. "
+    'If none or uncertain, return {"detections":[]}. '
+    "Evidence max 8 words."
     "Do not guess."
 )
 
 # ── 판정 프롬프트 (라바콘 접촉 단일 탐지) ────────────────────────────────────
 DETECT_PROMPT = (
-    "Check these CCTV frames for safety violations."
+    "Check all frames for clear listed violations only."
 )
 
 CHECK_PROMPT = (
