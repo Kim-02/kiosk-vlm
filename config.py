@@ -13,7 +13,7 @@ PYBIND_DEFAULT = (
 
 class AppConfig(BaseModel):
     # ── 런타임/엔진 경로 (변경 시 서버 재시작 필요) ──────────────────────────
-    ENGINE_DIR: str = "/media/ds/DATA/engines/qwen25-vl-7b-4k-b1-10x448"
+    ENGINE_DIR: str = "/media/ds/DATA/engines/qwen25-vl-7b-4k-b5"
     PLUGIN_PATH: str = "/home/ds/edge_llm/TensorRT-Edge-LLM/build/libNvInfer_edgellm_plugin.so"
     EDGELLM_PYBIND_DIR: str = PYBIND_DEFAULT
 

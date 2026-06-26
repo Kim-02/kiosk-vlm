@@ -48,6 +48,15 @@ TTS_PHRASE = {
     "safety_vest": "안전 고리를 착용하세요.",
 }
 
+# 라벨별 단일 판정 기준. 한 요청당 라벨마다 개별 추론을 돌릴 때 사용한다.
+LABEL_CRITERIA = {
+    "helmet_off": "a worker whose head is clearly visible and is not wearing a red helmet",
+    "cone_touch": "a worker whose hand or body is clearly touching an orange cone",
+    "fence_crossing": "a person clearly standing on, stepping on, or crossing an expandable safety rail",
+    "ladder_alone": "a worker clearly using or climbing a green ladder with no helper visible nearby",
+    "safety_vest": "a red helmet and upper body are clearly visible, but the safety hook is not above/on the helmet",
+}
+
 # ── 시스템 프롬프트 ──────────────────────────────────────────────────────────
 SYSTEM_PROMPT = (
     "You are a factory CCTV safety checker. "
@@ -73,9 +82,9 @@ SYSTEM_PROMPT = (
     "Do not guess."
 )
 
-# ── 판정 프롬프트 (라바콘 접촉 단일 탐지) ────────────────────────────────────
+# ── 판정 프롬프트 (라벨별 단일 판정의 유저 프롬프트) ─────────────────────────
 DETECT_PROMPT = (
-    "Check all frames for clear listed violations only."
+    "Check all frames and decide if the specified situation is present."
 )
 
 CHECK_PROMPT = (
@@ -196,27 +205,36 @@ def _resize_frame(src: Path, sub: str = "default") -> str:
     return str(out)
 
 
-def _run_vlm(
-    frame_paths: list[Path],
-    prompt: str,
-    sub: str,
-    system_prompt: str = SYSTEM_PROMPT,
-) -> tuple[str, list[str]]:
-    """프레임을 입력해 추론. (raw, 입력이미지경로목록) 반환."""
-    cfg = cfg_module.get()
-    all_image_paths: list[str] = [_resize_frame(p, sub) for p in frame_paths]
+def _resize_frames(frame_paths: list[Path], sub: str) -> list[str]:
+    """프레임들을 한 번만 리사이즈해 경로 목록을 반환."""
+    return [_resize_frame(p, sub) for p in frame_paths]
 
-    image_buffers = [_edgellm.load_image_from_path(rp) for rp in all_image_paths]
 
+def _build_messages(image_paths: list[str], system_prompt: str, prompt: str) -> list:
+    """system + (이미지들 + 텍스트) user 메시지 한 묶음을 구성."""
     messages = [
         _edgellm.Message("system", [_edgellm.MessageContent("text", system_prompt)]),
     ]
-    contents = [_edgellm.MessageContent("image", rp) for rp in all_image_paths]
+    contents = [_edgellm.MessageContent("image", rp) for rp in image_paths]
     contents.append(_edgellm.MessageContent("text", prompt))
     messages.append(_edgellm.Message("user", contents))
+    return messages
+
+
+def _run_vlm_batch(
+    image_paths: list[str],
+    items: list[tuple[str, str]],
+) -> list[str]:
+    """같은 이미지에 대해 여러 (system_prompt, prompt) 질의를 한 번의 배치로 추론.
+
+    items[i] = (system_prompt, user_prompt). 반환은 items와 같은 순서의 raw 출력 목록.
+    리사이즈는 호출자가 _resize_frames로 미리 수행한다.
+    """
+    cfg = cfg_module.get()
+    batch_messages = [_build_messages(image_paths, sp, pr) for sp, pr in items]
 
     gen_req = _edgellm.create_generation_request(
-        batch_messages=[messages],
+        batch_messages=batch_messages,
         temperature=cfg.TEMPERATURE,
         max_generate_length=cfg.MAX_TOKENS,
         top_p=cfg.TOP_P,
@@ -224,48 +242,88 @@ def _run_vlm(
         apply_chat_template=True,
         add_generation_prompt=True,
     )
-    gen_req.requests[0].image_buffers = image_buffers
+    # 이미지는 한 번만 로드한다.
+    image_buffers = [_edgellm.load_image_from_path(rp) for rp in image_paths]
 
-    log.info("추론 시작 | 프레임=%d장 | max_tokens=%d",
-             len(frame_paths), cfg.MAX_TOKENS)
+    # 각 batch request에 동일한 이미지 버퍼 리스트를 연결한다.
+    # 리스트 객체는 분리하고, buffer 객체는 재사용한다.
+    for req in gen_req.requests:
+        req.image_buffers = list(image_buffers)
+
+    log.info(
+        "배치 추론 시작 | 배치=%d | 이미지=%d장 | image_buffers=%d | max_tokens=%d",
+        len(batch_messages), len(image_paths), len(image_buffers), cfg.MAX_TOKENS,
+    )
+
     response = _runtime.handle_request(gen_req)
-    raw = response.output_texts[0] if response.output_texts else ""
-    log.info("추론 완료 | 출력길이=%d | 원문=%s", len(raw), raw[:300])
-    return raw, all_image_paths
+    outs = list(response.output_texts) if response.output_texts else []
+
+    # 출력 개수는 항상 batch_messages 개수와 맞춘다.
+    # 많으면 자르고, 부족하면 빈 문자열로 채운다.
+    expected = len(batch_messages)
+    if len(outs) > expected:
+        log.warning("배치 출력 초과 | expected=%d | actual=%d | 초과분 제거", expected, len(outs))
+        outs = outs[:expected]
+    elif len(outs) < expected:
+        log.warning("배치 출력 부족 | expected=%d | actual=%d | 빈 문자열 보정", expected, len(outs))
+        outs += [""] * (expected - len(outs))
+
+    log.info("배치 추론 완료 | 출력=%d개", len(outs))
+    return outs
+
+
+def _run_vlm(
+    image_paths: list[str],
+    prompt: str,
+    system_prompt: str = SYSTEM_PROMPT,
+) -> str:
+    """단일 질의 추론. _run_vlm_batch의 1개짜리 래퍼."""
+    return _run_vlm_batch(image_paths, [(system_prompt, prompt)])[0]
 
 
 # 최상위가 객체({...})든 배열([...])이든 잡아낸다.
 _JSON_RE = re.compile(r"[\[{].*[\]}]", re.DOTALL)
 
 
-def _parse_detections(raw: str) -> list[dict]:
-    """VLM 출력에서 detections 배열을 JSON 파싱해 그대로 반환.
+def _single_label_system_prompt(label: str) -> str:
+    """라벨 하나만 판정하도록 좁힌 시스템 프롬프트."""
+    return (
+        "You are a factory CCTV safety checker. "
+        "Images are consecutive CCTV frames; analyze them as one sequence. "
+        f"Decide ONLY whether this specific situation appears in any frame: {LABEL_CRITERIA[label]}. "
+        "Answer present=true only when the visual evidence is clear. "
+        "Do not infer hidden objects, unseen people, colors, or actions. "
+        "If blurry, occluded, cropped, or uncertain, answer present=false. "
+        "Return JSON only, no markdown, no extra text: "
+        '{"present": false, "evidence": ""} '
+        "Evidence must be short and visual, max 8 words. Do not guess."
+    )
 
-    필터링·검증 같은 후처리는 하지 않고, 파싱된 dict 목록만 돌려준다.
-    모델이 {"detections":[...]} 로 감싸든, 최상위 배열 [...] 로 주든 모두 처리한다.
-    JSON을 찾지 못하거나 형식이 맞지 않으면 빈 리스트를 반환한다.
+
+def _parse_single(raw: str) -> tuple[bool, str]:
+    """단일 라벨 판정 응답에서 (present, evidence)를 추출.
+
+    {"present": bool, "evidence": ""} 형식을 기대하되, 배열로 감싸 와도 첫 객체를 본다.
+    파싱 실패 시 (False, "")를 반환한다.
     """
     text = re.sub(r"```(?:json)?", "", raw.strip()).strip()
     m = _JSON_RE.search(text)
     if not m:
         log.warning("JSON 파싱 실패, 원문=%s", raw[:200])
-        return []
+        return False, ""
     try:
         obj = json.loads(m.group(0))
     except json.JSONDecodeError:
         log.warning("JSON 디코드 실패, 원문=%s", raw[:200])
-        return []
+        return False, ""
 
-    if isinstance(obj, dict):
-        raw_dets = obj.get("detections", [])
-    elif isinstance(obj, list):
-        raw_dets = obj
-    else:
-        raw_dets = []
-    if not isinstance(raw_dets, list):
-        return []
+    if isinstance(obj, list):
+        obj = next((d for d in obj if isinstance(d, dict)), {})
+    if not isinstance(obj, dict):
+        return False, ""
 
-    return [d for d in raw_dets if isinstance(d, dict)]
+    present = bool(obj.get("present", obj.get("detected", False)))
+    return present, str(obj.get("evidence", ""))
 
 
 def _inspect_images(paths: list[str]) -> list[dict]:
@@ -311,26 +369,32 @@ def _validate_and_select(dir_path: str) -> list[Path]:
 # ── 엔드포인트 ───────────────────────────────────────────────────────────────
 @app.post("/analyze", response_model=DetectResponse)
 async def analyze(req: AnalyzeRequest):
-    """통합 안전 탐지: 4종 위험 행동을 한 번에 판정."""
+    """라벨별 판정을 한 번의 배치 추론으로 처리한 뒤, 탐지 결과를 합쳐 TTS를 만든다."""
     frames = _validate_and_select(req.dir_path)
     request_id = str(uuid.uuid4())[:8]
 
-    log.info("analyze 시작 | req=%s | 폴더=%s | 프레임=%d", request_id, req.dir_path, len(frames))
+    log.info("analyze 시작 | req=%s | 폴더=%s | 프레임=%d | 라벨=%d종",
+             request_id, req.dir_path, len(frames), len(LABELS))
     t0 = time.perf_counter()
 
+    details: list[Detection] = []
+    raw_by_label: dict[str, str] = {}
+
+    # 라벨 5개를 한 번의 배치로 모델에 넣는다(리사이즈는 1회).
     async with _lock:
-        raw, _ = await asyncio.to_thread(_run_vlm, frames, DETECT_PROMPT, request_id)
+        image_paths = await asyncio.to_thread(_resize_frames, frames, request_id)
+        items = [(_single_label_system_prompt(label), DETECT_PROMPT) for label in LABELS]
+        raws = await asyncio.to_thread(_run_vlm_batch, image_paths, items)
+
+    for label, raw in zip(LABELS, raws):
+        raw_by_label[label] = raw.strip()
+        present, evidence = _parse_single(raw)
+        log.info("  라벨=%s | present=%s | evidence=%s", label, present, evidence[:80])
+        if present:
+            details.append(Detection(label=label, evidence=evidence))
 
     elapsed = time.perf_counter() - t0
-    dets = _parse_detections(raw)
-
-    print(f"dets={dets}")
-    details = [
-        Detection(label=str(d.get("label", "")), evidence=str(d.get("evidence", "")))
-        for d in dets
-    ]
-    print(f"details={details}")
-    labels = [det.label for det in details]
+    labels = [det.label for det in details]  # LABELS 순서로 누적됨
     tts = _build_tts(labels)
 
     log.info("analyze 완료 | req=%s | %.2fs | labels=%s", request_id, elapsed, labels)
@@ -341,7 +405,7 @@ async def analyze(req: AnalyzeRequest):
         labels=labels,
         tts_message=tts,
         details=details,
-        raw=raw.strip(),
+        raw=json.dumps(raw_by_label, ensure_ascii=False),
         elapsed_sec=round(elapsed, 3),
     )
 
@@ -355,9 +419,10 @@ async def v1_debug(req: AnalyzeRequest):
 
     t0 = time.perf_counter()
     async with _lock:
+        image_paths = await asyncio.to_thread(_resize_frames, frames, request_id)
         # 안전판정 시스템 프롬프트를 쓰지 않고, 중립적 설명만 수행
-        raw, image_paths = await asyncio.to_thread(
-            _run_vlm, frames, CHECK_PROMPT, request_id, DESCRIBE_SYSTEM_PROMPT,
+        raw = await asyncio.to_thread(
+            _run_vlm, image_paths, CHECK_PROMPT, DESCRIBE_SYSTEM_PROMPT,
         )
     elapsed = time.perf_counter() - t0
 
@@ -396,8 +461,9 @@ async def vlm(req: VLMRequest):
     t0 = time.perf_counter()
 
     async with _lock:
-        raw, image_paths = await asyncio.to_thread(
-            _run_vlm, [path], req.prompt, request_id, system_prompt,
+        image_paths = await asyncio.to_thread(_resize_frames, [path], request_id)
+        raw = await asyncio.to_thread(
+            _run_vlm, image_paths, req.prompt, system_prompt,
         )
     elapsed = time.perf_counter() - t0
 
