@@ -311,10 +311,12 @@ async def analyze(req: AnalyzeRequest):
     elapsed = time.perf_counter() - t0
     dets = _parse_detections(raw)
 
+    print(f"dets={dets}")
     details = [
         Detection(label=str(d.get("label", "")), evidence=str(d.get("evidence", "")))
         for d in dets
     ]
+    print(f"details={details}")
     labels = [det.label for det in details]
     tts = _build_tts(labels)
 
