@@ -16,10 +16,6 @@ class AppConfig(BaseModel):
     ENGINE_DIR: str = "/media/ds/DATA/engines/qwen25-vl-7b-4k-b1-10x448"
     PLUGIN_PATH: str = "/home/ds/edge_llm/TensorRT-Edge-LLM/build/libNvInfer_edgellm_plugin.so"
     EDGELLM_PYBIND_DIR: str = PYBIND_DEFAULT
-    # 참조(few-shot) 이미지 경로. DANGER/SAFE/HARD CASE 3열 콜라주. (변경 시 재시작 필요)
-    REFERENCE_IMAGE_PATH: str = (
-        "/media/ds/DATA/image/tune_image.png"
-    )
 
     # ── 프레임 처리 ──────────────────────────────────────────────────────────
     NUM_FRAMES: int = 10
@@ -33,16 +29,6 @@ class AppConfig(BaseModel):
     TEMPERATURE: float = 0.0
     TOP_P: float = 1.0
     TOP_K: int = 1
-
-    # ── 행동별 알림 임계값. 오탐 잦으면 올리고 미탐 잦으면 내린다. ───────────
-    CONFIDENCE_THRESHOLD: dict[str, float] = Field(
-        default_factory=lambda: {
-            "helmet_off": 0.6,
-            "cone_touch": 0.6,
-            "fence_crossing": 0.6,
-            "ladder_alone": 0.6,
-        }
-    )
 
     # ── 서버 ─────────────────────────────────────────────────────────────────
     HOST: str = "0.0.0.0"
@@ -69,10 +55,7 @@ def init() -> AppConfig:
 
 
 def update(patch: dict[str, Any]) -> AppConfig:
-    """부분 업데이트. 알 수 없는 키는 거부한다.
-
-    CONFIDENCE_THRESHOLD는 dict이므로 기존 값에 병합한다(라벨 단위 부분 수정 지원).
-    """
+    """부분 업데이트. 알 수 없는 키는 거부한다."""
     global _state
     unknown = set(patch) - set(AppConfig.model_fields)
     if unknown:
@@ -82,10 +65,7 @@ def update(patch: dict[str, Any]) -> AppConfig:
     for key, value in patch.items():
         if value is None:
             continue
-        if key == "CONFIDENCE_THRESHOLD" and isinstance(value, dict):
-            merged[key] = {**merged[key], **value}
-        else:
-            merged[key] = value
+        merged[key] = value
 
     _state = AppConfig.model_validate(merged)
     _save(_state)

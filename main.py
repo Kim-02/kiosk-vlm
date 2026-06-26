@@ -36,6 +36,7 @@ LABEL_KO = {
     "cone_touch": "라바콘 접촉",
     "fence_crossing": "위험 펜스 넘음",
     "ladder_alone": "사다리 단독 이용",
+    "safety_vest": "안전 고리 미착용",
 }
 
 # 행동별 제지 TTS 문구. 여러 개 감지되면 이어붙인다.
@@ -44,21 +45,24 @@ TTS_PHRASE = {
     "cone_touch": "라바콘에서 손을 떼세요.",
     "fence_crossing": "위험 펜스를 넘지 마세요.",
     "ladder_alone": "사다리를 혼자 사용하지 마세요. 보조자를 배치하세요.",
+    "safety_vest": "안전 고리를 착용하세요.",
 }
 
 # ── 시스템 프롬프트 ──────────────────────────────────────────────────────────
 SYSTEM_PROMPT = (
-    "당신은 공장 안전 감시 시스템입니다. 첫 번째 이미지는 판정 기준 참조표입니다"
-    "(DANGER=탐지대상, SAFE=정상, HARD CASE=헷갈리지만 정상). "
-    "이후 이미지들은 실제 CCTV 연속 프레임입니다. "
-    "이번 작업에서는 '라바콘 접촉' 한 가지만 판단합니다. "
-    "참조표의 라바콘 기준을 따르되, 추측하지 말고 프레임에서 명확히 보이는 근거로만 판단하며, "
-    "지정된 JSON 형식으로만 답하세요."
+    "당신은 공장 안전 감시 시스템입니다. "
+    "이미지들은 실제 CCTV 연속 프레임입니다. "
+    "사물과 행동에 중점을 두고 판단. "
+    "응답은 반드시 아래 JSON 형식으로만 출력하고, JSON 외의 어떤 텍스트도 출력하지 마라.\n"
+    '{"detections": [{"label": "<탐지 라벨>", "evidence": "<판단 근거 텍스트>"}]}\n'
+    "각 탐지 객체에는 label과 evidence 두 키만 포함한다. "
+    "탐지된 것이 없으면 detections를 빈 배열([])로 둔다."
 )
 
 # ── 판정 프롬프트 (라바콘 접촉 단일 탐지) ────────────────────────────────────
 DETECT_PROMPT = (
-    "화면에 흰색과 빨간색으로 이루어진 물체가 있는지 말해줘"
+    "화면에 작업자가 안전고리를 철제 구조물에 걸고 있는지를 판단하라."
+    "걸고 있지 않다면 safety_vest 라밸을 붙이고, 근거를 evidence에 작성하라. "
 )
 
 CHECK_PROMPT = (
@@ -77,7 +81,6 @@ DESCRIBE_SYSTEM_PROMPT = (
 _runtime: Any = None
 _edgellm: Any = None
 _lock = asyncio.Lock()
-_reference_resized: str | None = None  # 참조 이미지는 한 번만 리사이즈해 캐시
 
 
 def _load_edgellm_module(pybind_dir: str) -> Any:
@@ -89,7 +92,7 @@ def _load_edgellm_module(pybind_dir: str) -> Any:
 # ── 앱 수명주기 ──────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global _runtime, _edgellm, _reference_resized
+    global _runtime, _edgellm
 
     cfg = cfg_module.init()
     os.environ["EDGELLM_PLUGIN_PATH"] = cfg.PLUGIN_PATH
@@ -103,15 +106,6 @@ async def lifespan(_: FastAPI):
         multimodal_engine_dir=cfg.ENGINE_DIR,
     )
     log.info("LLMRuntime 로드 완료")
-
-    # 참조 이미지 사전 리사이즈
-    ref = Path(cfg.REFERENCE_IMAGE_PATH)
-    if ref.is_file():
-        _reference_resized = _resize_frame(ref, "reference")
-        log.info("참조 이미지 로드 완료: %s", _reference_resized)
-    else:
-        log.warning("참조 이미지를 찾을 수 없습니다: %s (텍스트 기준만으로 동작)", cfg.REFERENCE_IMAGE_PATH)
-        _reference_resized = None
 
     yield
 
@@ -134,7 +128,6 @@ class VLMRequest(BaseModel):
 
 class Detection(BaseModel):
     label: str
-    confidence: float
     evidence: str
 
 
@@ -195,17 +188,10 @@ def _run_vlm(
     prompt: str,
     sub: str,
     system_prompt: str = SYSTEM_PROMPT,
-    use_reference: bool = True,
 ) -> tuple[str, list[str]]:
-    """프레임(+선택적 참조 이미지)을 입력해 추론. (raw, 입력이미지경로목록) 반환."""
+    """프레임을 입력해 추론. (raw, 입력이미지경로목록) 반환."""
     cfg = cfg_module.get()
-    resized = [_resize_frame(p, sub) for p in frame_paths]
-
-    # 참조 이미지를 맨 앞에 붙인다 (시스템/프롬프트에서 '첫 번째 이미지'로 지칭)
-    all_image_paths: list[str] = []
-    if use_reference and _reference_resized:
-        all_image_paths.append(_reference_resized)
-    all_image_paths.extend(resized)
+    all_image_paths: list[str] = [_resize_frame(p, sub) for p in frame_paths]
 
     image_buffers = [_edgellm.load_image_from_path(rp) for rp in all_image_paths]
 
@@ -227,8 +213,8 @@ def _run_vlm(
     )
     gen_req.requests[0].image_buffers = image_buffers
 
-    log.info("추론 시작 | 참조=%s | 프레임=%d장 | 총이미지=%d장 | max_tokens=%d",
-             bool(_reference_resized), len(frame_paths), len(all_image_paths), cfg.MAX_TOKENS)
+    log.info("추론 시작 | 프레임=%d장 | max_tokens=%d",
+             len(frame_paths), cfg.MAX_TOKENS)
     response = _runtime.handle_request(gen_req)
     raw = response.output_texts[0] if response.output_texts else ""
     log.info("추론 완료 | 출력길이=%d | 원문=%s", len(raw), raw[:300])
@@ -239,7 +225,11 @@ _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 def _parse_detections(raw: str) -> list[dict]:
-    """VLM 출력에서 detections 배열을 안전하게 추출."""
+    """VLM 출력에서 detections 배열을 JSON 파싱해 그대로 반환.
+
+    필터링·검증 같은 후처리는 하지 않고, 파싱된 dict 목록만 돌려준다.
+    JSON을 찾지 못하거나 형식이 맞지 않으면 빈 리스트를 반환한다.
+    """
     text = re.sub(r"```(?:json)?", "", raw.strip()).strip()
     m = _JSON_RE.search(text)
     if not m:
@@ -255,22 +245,7 @@ def _parse_detections(raw: str) -> list[dict]:
     if not isinstance(raw_dets, list):
         return []
 
-    out: list[dict] = []
-    seen: set[str] = set()
-    for d in raw_dets:
-        if not isinstance(d, dict):
-            continue
-        label = str(d.get("label", "")).strip()
-        if label not in LABELS or label in seen:
-            continue
-        try:
-            conf = float(d.get("confidence", 0.0))
-        except (TypeError, ValueError):
-            conf = 0.0
-        conf = max(0.0, min(1.0, conf))
-        out.append({"label": label, "confidence": conf, "evidence": str(d.get("evidence", ""))})
-        seen.add(label)
-    return out
+    return [d for d in raw_dets if isinstance(d, dict)]
 
 
 def _inspect_images(paths: list[str]) -> list[dict]:
@@ -329,20 +304,21 @@ async def analyze(req: AnalyzeRequest):
     elapsed = time.perf_counter() - t0
     dets = _parse_detections(raw)
 
-    # 임계값 통과한 것만 최종 채택
-    thresholds = cfg_module.get().CONFIDENCE_THRESHOLD
-    kept = [d for d in dets if d["confidence"] >= thresholds.get(d["label"], 0.6)]
-    labels = [lb for lb in LABELS if lb in {d["label"] for d in kept}]  # LABELS 순서 유지
+    details = [
+        Detection(label=str(d.get("label", "")), evidence=str(d.get("evidence", "")))
+        for d in dets
+    ]
+    labels = [det.label for det in details]
     tts = _build_tts(labels)
 
     log.info("analyze 완료 | req=%s | %.2fs | labels=%s", request_id, elapsed, labels)
 
     return DetectResponse(
         request_id=request_id,
-        detected=bool(labels),
+        detected=bool(details),
         labels=labels,
         tts_message=tts,
-        details=[Detection(**d) for d in kept],
+        details=details,
         raw=raw.strip(),
         elapsed_sec=round(elapsed, 3),
     )
@@ -357,9 +333,9 @@ async def v1_debug(req: AnalyzeRequest):
 
     t0 = time.perf_counter()
     async with _lock:
-        # 참조표/안전판정 시스템 프롬프트를 쓰지 않고, 중립적 설명만 수행
+        # 안전판정 시스템 프롬프트를 쓰지 않고, 중립적 설명만 수행
         raw, image_paths = await asyncio.to_thread(
-            _run_vlm, frames, CHECK_PROMPT, request_id, DESCRIBE_SYSTEM_PROMPT, False,
+            _run_vlm, frames, CHECK_PROMPT, request_id, DESCRIBE_SYSTEM_PROMPT,
         )
     elapsed = time.perf_counter() - t0
 
@@ -369,7 +345,7 @@ async def v1_debug(req: AnalyzeRequest):
         "request_id": request_id,
         "description": raw.strip(),
         "frames_used": [str(f) for f in frames],
-        # 모델에 실제로 입력된 프레임들(리사이즈 후 경로/크기/로드여부). 디버그에선 참조 미사용.
+        # 모델에 실제로 입력된 프레임들(리사이즈 후 경로/크기/로드여부).
         "images_fed": images,
         "elapsed_sec": round(elapsed, 3),
     }
@@ -399,7 +375,7 @@ async def vlm(req: VLMRequest):
 
     async with _lock:
         raw, image_paths = await asyncio.to_thread(
-            _run_vlm, [path], req.prompt, request_id, system_prompt, False,
+            _run_vlm, [path], req.prompt, request_id, system_prompt,
         )
     elapsed = time.perf_counter() - t0
 
@@ -416,7 +392,7 @@ async def vlm(req: VLMRequest):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "reference_loaded": bool(_reference_resized)}
+    return {"status": "ok"}
 
 
 # ── 설정 API ─────────────────────────────────────────────────────────────────
@@ -431,7 +407,7 @@ async def update_config(patch: dict[str, Any]):
     """설정 부분 업데이트 후 config.json에 저장.
 
     샘플링 파라미터·임계값·프레임 설정은 즉시 반영된다.
-    경로(ENGINE_DIR/PLUGIN_PATH/EDGELLM_PYBIND_DIR/REFERENCE_IMAGE_PATH)·HOST·PORT는
+    경로(ENGINE_DIR/PLUGIN_PATH/EDGELLM_PYBIND_DIR)·HOST·PORT는
     서버 재시작 후에 적용된다.
     """
     try:
