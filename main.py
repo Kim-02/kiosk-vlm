@@ -50,23 +50,26 @@ TTS_PHRASE = {
 
 # ── 시스템 프롬프트 ──────────────────────────────────────────────────────────
 SYSTEM_PROMPT = (
-    "당신은 공장 안전 감시 시스템입니다. "
-    "이미지들은 실제 CCTV 연속 프레임입니다. "
-    "사물과 행동에 중점을 두고 판단. "
-    "응답은 반드시 아래 JSON 형식으로만 출력하고, JSON 외의 어떤 텍스트도 출력하지 마라.\n"
-    '{"detections": [{"label": "<탐지 라벨>", "evidence": "<판단 근거 텍스트>"}]}\n'
-    "각 탐지 객체에는 label과 evidence 두 키만 포함한다. "
-    "탐지된 것이 없으면 detections를 빈 배열([])로 둔다."
+    "You are a factory CCTV safety checker. "
+    "Check only these labels: "
+    "helmet_off=worker without red helmet; "
+    "cone_touch=worker touching orange cone; "
+    "fence_crossing=person on/crossing expandable safety rail; "
+    "ladder_alone=worker alone on green ladder; "
+    "safety_vest=safety hook not above/on red helmet. "
+    "Return JSON only. "
+    '{"detections":[{"label":"","evidence":""}]} '
+    "Use only listed label keys. "
+    "Evidence must be very short. "
+    "evidence max 6 words."
+    "Report each label once. "
+    'If none, return {"detections":[]}. '
+    "Do not guess."
 )
 
 # ── 판정 프롬프트 (라바콘 접촉 단일 탐지) ────────────────────────────────────
 DETECT_PROMPT = (
-    "화면에 작업자가 안전고리를 머리 위에 위치하고 있는지를 판단하라."
-    "작업자 머리 위에 안전고리가 위치하고 있지 않다면 safety_vest 라밸을 붙이고, 근거를 evidence에 작성하라. "
-    "작업자 머리 위에 안전고리가 위치하고 있다면 detections를 빈 배열([])로 둔다. "
-    "화면에 작업자가 사다리를 혼자 올라가고 있는지를 판단하라. "
-    "작업자가 녹색 사다리를 혼자 올라가고 있다면 ladder_alone 라밸을 붙이고, 근거를 evidence에 작성하라. "
-    "작업자가 녹색 사다리를 혼자 올라가고 있지 않다면 detections를 빈 배열([])로 둔다. "
+    "Check these CCTV frames for safety violations."
 )
 
 CHECK_PROMPT = (
