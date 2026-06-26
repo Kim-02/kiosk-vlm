@@ -29,7 +29,7 @@ _FRAME_RE = re.compile(r"^frame_(\d+)$|^frame(\d+)$")
 
 # ── 라벨 정의 (후처리용 고정 키) ─────────────────────────────────────────────
 # 현재는 '라바콘 접촉'만 탐지. (다른 라벨이 모델에서 나와도 후처리에서 걸러진다)
-LABELS = ["cone_touch"]
+LABELS = ["cone_touch", "helmet_off", "fence_crossing", "ladder_alone", "safety_vest"]
 
 LABEL_KO = {
     "helmet_off": "안전모 미착용",
