@@ -31,14 +31,6 @@ _FRAME_RE = re.compile(r"^frame_(\d+)$|^frame(\d+)$")
 # 현재는 '라바콘 접촉'만 탐지. (다른 라벨이 모델에서 나와도 후처리에서 걸러진다)
 LABELS = ["cone_touch", "helmet_off", "fence_crossing", "ladder_alone", "safety_vest"]
 
-LABEL_KO = {
-    "helmet_off": "안전모 미착용",
-    "cone_touch": "라바콘 접촉",
-    "fence_crossing": "위험 펜스 넘음",
-    "ladder_alone": "사다리 단독 이용",
-    "safety_vest": "안전 고리 미착용",
-}
-
 # 행동별 제지 TTS 문구. 여러 개 감지되면 이어붙인다.
 TTS_PHRASE = {
     "helmet_off": "안전모를 착용하세요.",
@@ -50,37 +42,22 @@ TTS_PHRASE = {
 
 # 라벨별 단일 판정 기준. 한 요청당 라벨마다 개별 추론을 돌릴 때 사용한다.
 LABEL_CRITERIA = {
-    "helmet_off": "a worker whose head is clearly visible and is not wearing a red helmet",
-    "cone_touch": "a worker whose hand or body is clearly touching an orange cone",
-    "fence_crossing": "a person clearly standing on, stepping on, or crossing an expandable safety rail",
-    "ladder_alone": "a worker clearly using or climbing a green ladder with no helper visible nearby",
-    "safety_vest": "a red helmet and upper body are clearly visible, but the safety hook is not above/on the helmet",
+    "helmet_off": "Is the worker on the screen wearing a red hard hat? tell true or false",
+    "cone_touch": "Is there a worker touching an orange construction cone on the screen? just tell true or false",
+    "fence_crossing": "Is there a worker clearly standing on, stepping on, or crossing an expandable safety rail? just tell true or false",
+    "ladder_alone": "Is there a worker on the screen climbing a green ladder alone? just tell true or false",
+    "safety_vest": "Is the worker on the screen wearing a safety hook? just tell true or false",
 }
 
-# ── 시스템 프롬프트 ──────────────────────────────────────────────────────────
-SYSTEM_PROMPT = (
-    "You are a factory CCTV safety checker. "
-    "Images are consecutive CCTV frames. Analyze them as one sequence. "
-    "Detect all clearly visible safety violations. Multiple labels may appear at once. "
-    "Check only these labels: "
-    "helmet_off=worker head is clearly visible and no red helmet is worn; "
-    "cone_touch=worker hand/body is clearly touching orange cone; "
-    "fence_crossing=person is clearly standing on, stepping on, or crossing expandable safety rail; "
-    "ladder_alone=worker is clearly using/climbing green ladder and no helper is visible nearby; "
-    "safety_vest=red helmet and upper area are clearly visible, but safety hook is not above/on helmet. "
-    "Report a label only when visual evidence is clear. "
-    "Do not infer hidden objects, unseen people, colors, or actions. "
-    "Do not report if blurry, occluded, cropped, or uncertain. "
-    "If a label appears in any frame, report it once. "
-    "Return JSON only, no markdown, no extra text. "
-    '{"detections":[{"label":"","evidence":""}]} '
-    "label must be one listed key. "
-    "Each item must have only label and evidence. "
-    "Evidence must be short and visual. "
-    'If none or uncertain, return {"detections":[]}. '
-    "Evidence max 8 words."
-    "Do not guess."
-)
+# 라벨별로 '위반(present)'을 의미하는 모델 응답.
+# 질문이 긍정형(착용?/사용?)이면 false가 위반, 위험상황을 직접 묻는 질문이면 true가 위반.
+VIOLATION_WHEN = {
+    "helmet_off": False,      # "빨간 안전모 착용?" → 미착용(false)이 위반
+    "cone_touch": True,       # "콘 접촉?" → 접촉(true)이 위반
+    "fence_crossing": True,   # "펜스 넘음?" → 넘음(true)이 위반
+    "ladder_alone": True,     # "사다리 단독 사용?" → 단독(true)이 위반
+    "safety_vest": False,     # "안전 고리 착용?" → 미착용(false)이 위반
+}
 
 # ── 판정 프롬프트 (라벨별 단일 판정의 유저 프롬프트) ─────────────────────────
 DETECT_PROMPT = (
@@ -275,55 +252,39 @@ def _run_vlm_batch(
 def _run_vlm(
     image_paths: list[str],
     prompt: str,
-    system_prompt: str = SYSTEM_PROMPT,
+    system_prompt: str,
 ) -> str:
     """단일 질의 추론. _run_vlm_batch의 1개짜리 래퍼."""
     return _run_vlm_batch(image_paths, [(system_prompt, prompt)])[0]
 
 
-# 최상위가 객체({...})든 배열([...])이든 잡아낸다.
-_JSON_RE = re.compile(r"[\[{].*[\]}]", re.DOTALL)
+# 모델 응답에서 true/false 토큰을 잡아낸다(대소문자 무시).
+_BOOL_RE = re.compile(r"\b(true|false)\b", re.IGNORECASE)
 
 
 def _single_label_system_prompt(label: str) -> str:
     """라벨 하나만 판정하도록 좁힌 시스템 프롬프트."""
     return (
-        "You are a factory CCTV safety checker. "
         "Images are consecutive CCTV frames; analyze them as one sequence. "
-        f"Decide ONLY whether this specific situation appears in any frame: {LABEL_CRITERIA[label]}. "
-        "Answer present=true only when the visual evidence is clear. "
-        "Do not infer hidden objects, unseen people, colors, or actions. "
-        "If blurry, occluded, cropped, or uncertain, answer present=false. "
-        "Return JSON only, no markdown, no extra text: "
-        '{"present": false, "evidence": ""} '
-        "Evidence must be short and visual, max 8 words. Do not guess."
+        "If no person is visible, return [] immediately. "
+        f"{LABEL_CRITERIA[label]}."
     )
 
 
-def _parse_single(raw: str) -> tuple[bool, str]:
-    """단일 라벨 판정 응답에서 (present, evidence)를 추출.
+def _parse_bool(raw: str) -> bool | None:
+    """모델 응답 텍스트에서 첫 번째 true/false 판정을 추출.
 
-    {"present": bool, "evidence": ""} 형식을 기대하되, 배열로 감싸 와도 첫 객체를 본다.
-    파싱 실패 시 (False, "")를 반환한다.
+    사람이 없으면 모델이 '[]'를 반환하므로 None(위반 아님)으로 처리한다.
+    그 외에 true/false 토큰을 찾지 못해도 None을 반환한다(판정 불가).
     """
-    text = re.sub(r"```(?:json)?", "", raw.strip()).strip()
-    m = _JSON_RE.search(text)
+    text = raw.strip()
+    if "[]" in text:
+        return None  # 사람 없음 → 판정 대상 없음
+    m = _BOOL_RE.search(text)
     if not m:
-        log.warning("JSON 파싱 실패, 원문=%s", raw[:200])
-        return False, ""
-    try:
-        obj = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        log.warning("JSON 디코드 실패, 원문=%s", raw[:200])
-        return False, ""
-
-    if isinstance(obj, list):
-        obj = next((d for d in obj if isinstance(d, dict)), {})
-    if not isinstance(obj, dict):
-        return False, ""
-
-    present = bool(obj.get("present", obj.get("detected", False)))
-    return present, str(obj.get("evidence", ""))
+        log.warning("true/false 파싱 실패, 원문=%s", raw[:200])
+        return None
+    return m.group(1).lower() == "true"
 
 
 def _inspect_images(paths: list[str]) -> list[dict]:
@@ -388,10 +349,12 @@ async def analyze(req: AnalyzeRequest):
 
     for label, raw in zip(LABELS, raws):
         raw_by_label[label] = raw.strip()
-        present, evidence = _parse_single(raw)
-        log.info("  라벨=%s | present=%s | evidence=%s", label, present, evidence[:80])
+        answer = _parse_bool(raw)  # 모델이 답한 true/false (None=판정 불가)
+        # 라벨마다 위반을 의미하는 답이 다르다(VIOLATION_WHEN).
+        present = answer is not None and answer == VIOLATION_WHEN[label]
+        log.info("  라벨=%s | answer=%s | present=%s", label, answer, present)
         if present:
-            details.append(Detection(label=label, evidence=evidence))
+            details.append(Detection(label=label, evidence=raw.strip()))
 
     elapsed = time.perf_counter() - t0
     labels = [det.label for det in details]  # LABELS 순서로 누적됨
