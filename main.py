@@ -130,6 +130,13 @@ class VLMRequest(BaseModel):
     system_prompt: str | None = None
 
 
+class SafetyDebugRequest(BaseModel):
+    # 이미지 파일 한 장 또는 프레임 폴더 경로 둘 다 허용한다.
+    path: str
+    prompt: str
+    system_prompt: str | None = None
+
+
 class DetectResponse(BaseModel):
     request_id: str
     detected: bool
@@ -423,6 +430,54 @@ async def v1_debug(req: AnalyzeRequest):
     return {
         "request_id": request_id,
         "description": raw.strip(),
+        "frames_used": [str(f) for f in frames],
+        # 모델에 실제로 입력된 프레임들(리사이즈 후 경로/크기/로드여부).
+        "images_fed": images,
+        "elapsed_sec": round(elapsed, 3),
+    }
+
+
+@app.post("/safety/debug")
+async def safety_debug(req: SafetyDebugRequest):
+    """이미지 한 장 또는 프레임 폴더 + 임의 프롬프트로 VLM을 직접 호출한다.
+
+    2단계 안전판정 파이프라인을 거치지 않고 지정한 프롬프트로만 추론하므로,
+    안전 프롬프트를 실제 입력(다중 프레임 포함)에 바로 테스트할 수 있다.
+    경로가 폴더면 analyze와 동일하게 프레임을 선별해 연속 프레임으로 넣는다.
+    system_prompt 미지정 시 중립적 설명 프롬프트를 사용한다.
+    """
+    p = Path(req.path)
+    if p.is_dir():
+        frames = _validate_and_select(req.path)
+    elif p.is_file():
+        if p.suffix.lower() not in FRAME_EXTS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"지원하지 않는 이미지 형식입니다: {p.suffix} (지원: {sorted(FRAME_EXTS)})",
+            )
+        frames = [p]
+    else:
+        raise HTTPException(status_code=400, detail=f"경로가 존재하지 않습니다: {req.path}")
+
+    request_id = str(uuid.uuid4())[:8]
+    system_prompt = req.system_prompt or DESCRIBE_SYSTEM_PROMPT
+
+    log.info("safety/debug 시작 | req=%s | 경로=%s | 프레임=%d",
+             request_id, req.path, len(frames))
+    t0 = time.perf_counter()
+
+    async with _lock:
+        image_paths = await asyncio.to_thread(_resize_frames, frames, request_id)
+        raw = await asyncio.to_thread(_run_vlm, image_paths, req.prompt, system_prompt)
+    elapsed = time.perf_counter() - t0
+
+    images = await asyncio.to_thread(_inspect_images, image_paths)
+
+    log.info("safety/debug 완료 | req=%s | %.2fs", request_id, elapsed)
+
+    return {
+        "request_id": request_id,
+        "response": raw.strip(),
         "frames_used": [str(f) for f in frames],
         # 모델에 실제로 입력된 프레임들(리사이즈 후 경로/크기/로드여부).
         "images_fed": images,
