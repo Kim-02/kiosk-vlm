@@ -13,19 +13,19 @@ PYBIND_DEFAULT = (
 
 class AppConfig(BaseModel):
     # ── 런타임/엔진 경로 (변경 시 서버 재시작 필요) ──────────────────────────
-    ENGINE_DIR: str = "/media/ds/DATA/engines/qwen25-vl-7b-4k-b5"
+    ENGINE_DIR: str = "/media/ds/DATA/engines/qwen25-vl-7b-2k-b5"
     PLUGIN_PATH: str = "/home/ds/edge_llm/TensorRT-Edge-LLM/build/libNvInfer_edgellm_plugin.so"
     EDGELLM_PYBIND_DIR: str = PYBIND_DEFAULT
 
     # ── 프레임 처리 ──────────────────────────────────────────────────────────
-    NUM_FRAMES: int = 4
-    FRAME_SIZE: int = 1024
+    NUM_FRAMES: int = 2
+    FRAME_SIZE: int = 1536
     JPEG_QUALITY: int = 95
     RESIZE_TMP_DIR: str = "/tmp/vlm_resized"
 
     # ── 샘플링 파라미터 ──────────────────────────────────────────────────────
     # TEMPERATURE=0.0(그리디)일 때는 TOP_P=1.0, TOP_K=1 이어야 경고/수치 불안정이 없다.
-    MAX_TOKENS: int = 384
+    MAX_TOKENS: int = 16
     TEMPERATURE: float = 0.0
     TOP_P: float = 1.0
     TOP_K: int = 1

@@ -160,6 +160,8 @@ def select_frames(frames: list[Path], target: int | None = None) -> list[Path]:
     n = len(frames)
     if n <= target:
         return frames
+    if target == 1:
+        return [frames[n // 2]]
     indices = [round(i * (n - 1) / (target - 1)) for i in range(target)]
     return [frames[i] for i in indices]
 
