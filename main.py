@@ -41,9 +41,9 @@ TTS_PHRASE = {
 
 # 라벨별 단일 판정 기준. 한 요청당 라벨마다 개별 추론을 돌릴 때 사용한다.
 LABEL_CRITERIA = {
-    "helmet_off": "Did all the workers wear hard hats? tell true or false or none",
+    "helmet_off": "Did all the workers wear red hard hats? just tell true or false or none",
     "cone_touch": "Is the worker touch an orange traffic cone? just tell true or false or none",
-    "fence_crossing": "Is there someone to the left of the yellow fence? just tell true or false or none",
+    "fence_crossing": "Is there at least one person to the left of the yellow fence? just tell true or false or none",
     "ladder_alone": "Is the worker using the green ladder alone? just tell true or false or none",
     "safety_vest": "Did all the workers wear safety vests? just tell true or false or none",
 }
@@ -60,7 +60,7 @@ VIOLATION_WHEN = {
 
 # ── 판정 프롬프트 (라벨별 단일 판정의 유저 프롬프트) ─────────────────────────
 DETECT_PROMPT = (
-    "Check all frames and decide if the specified situation is present."
+    "Look at the image and decide if the specified situation is present."
 )
 
 CHECK_PROMPT = (
@@ -71,7 +71,6 @@ CHECK_PROMPT = (
 # 안전판정/참조표와 무관하게, 보이는 장면을 있는 그대로만 묘사하도록 한다.
 DESCRIBE_SYSTEM_PROMPT = (
     "당신은 영상 장면을 객관적으로 묘사하는 도우미입니다. "
-    "이미지들은 시간 순서대로 이어진 연속 프레임입니다. "
     "위험/안전을 판정하지 말고, 화면에 실제로 보이는 것만 한국어로 설명하세요."
 )
 
@@ -93,6 +92,14 @@ async def lifespan(_: FastAPI):
     global _runtime, _edgellm
 
     cfg = cfg_module.init()
+    # 실제로 적용된 설정값을 시작 시 한 번 찍는다.
+    # (config.json이 config.py 기본값을 덮으므로, 무엇이 로드됐는지 명시적으로 확인)
+    log.info(
+        "설정 적용 | ENGINE_DIR=%s | NUM_FRAMES=%d | FRAME_SIZE=%d | MAX_TOKENS=%d "
+        "| TEMP=%s | TOP_P=%s | TOP_K=%d",
+        cfg.ENGINE_DIR, cfg.NUM_FRAMES, cfg.FRAME_SIZE, cfg.MAX_TOKENS,
+        cfg.TEMPERATURE, cfg.TOP_P, cfg.TOP_K,
+    )
     os.environ["EDGELLM_PLUGIN_PATH"] = cfg.PLUGIN_PATH
 
     log.info("_edgellm_runtime 모듈 로드 중... (%s)", cfg.EDGELLM_PYBIND_DIR)
@@ -171,6 +178,9 @@ def _resize_frame(src: Path, sub: str = "default") -> str:
     cfg = cfg_module.get()
     img = cv2.imread(str(src))
     if img is None:
+        # 읽기 실패 시 원본 경로를 그대로 반환하면 풀해상도가 그대로 추론에 들어간다.
+        # 조용히 넘어가면 디버깅이 어려우므로 반드시 경고를 남긴다.
+        log.warning("리사이즈 실패(이미지 로드 불가) → 원본 그대로 사용: %s", src)
         return str(src)
     h, w = img.shape[:2]
     if max(h, w) <= cfg.FRAME_SIZE:
@@ -187,6 +197,17 @@ def _resize_frame(src: Path, sub: str = "default") -> str:
 def _resize_frames(frame_paths: list[Path], sub: str) -> list[str]:
     """프레임들을 한 번만 리사이즈해 경로 목록을 반환."""
     return [_resize_frame(p, sub) for p in frame_paths]
+
+
+def _cleanup_resized(sub: str) -> None:
+    """요청별 리사이즈 임시 디렉토리를 제거한다(디스크 누적 방지).
+
+    원본 파일은 다른 위치에 있으므로 영향받지 않는다. 실패해도 추론 결과엔
+    무관하므로 조용히 무시한다.
+    """
+    import shutil
+    tmp_dir = Path(cfg_module.get().RESIZE_TMP_DIR) / sub
+    shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _build_messages(image_paths: list[str], system_prompt: str, prompt: str) -> list:
@@ -272,14 +293,22 @@ _BOOL_RE = re.compile(r"\b(true|false|yes|no)\b", re.IGNORECASE)
 _TRUE_TOKENS = {"true", "yes"}
 
 
-def _single_label_user_prompt(label: str) -> str:
+def _single_label_user_prompt(label: str, n_images: int = 1) -> str:
     """라벨 하나만 판정하도록 좁힌 유저 프롬프트.
 
     VLM 챗 템플릿이 마지막 user 메시지를 핵심 지시로 보므로, 실제 판정 질문은
     system이 아니라 user 메시지로 보낸다(시스템 프롬프트는 DETECT_PROMPT 사용).
+    입력 프레임 수에 맞춰 단일/다중 프레임 맥락을 정확히 알려준다.
     """
+    if n_images <= 1:
+        context = "This is a single CCTV image."
+    else:
+        context = (
+            f"These are {n_images} consecutive CCTV frames; "
+            "analyze them as one sequence."
+        )
     return (
-        "Images are consecutive CCTV frames; analyze them as one sequence. "
+        f"{context} "
         "If no person is visible, return none immediately. "
         f"{LABEL_CRITERIA[label]}."
     )
@@ -303,18 +332,35 @@ def _parse_bool(raw: str) -> bool | None:
 
 
 def _inspect_images(paths: list[str]) -> list[dict]:
-    """모델에 실제 입력된 이미지들의 로드 가능 여부와 크기를 점검."""
-    import cv2
+    """모델에 실제 입력된 이미지들의 로드 가능 여부와 크기를 점검.
+
+    매 analyze 요청마다 호출되므로, 픽셀 전체를 디코딩하지 않고 헤더만 읽어
+    크기를 얻는다(PIL). PIL이 없을 때만 cv2 전체 디코딩으로 폴백한다.
+    """
     info: list[dict] = []
     for p in paths:
-        img = cv2.imread(p)
-        ok = img is not None
+        w = h = None
+        ok = False
+        try:
+            from PIL import Image
+            with Image.open(p) as im:
+                w, h = im.size
+            ok = True
+        except Exception:
+            try:
+                import cv2
+                img = cv2.imread(p)
+                if img is not None:
+                    h, w = int(img.shape[0]), int(img.shape[1])
+                    ok = True
+            except Exception:
+                ok = False
         info.append({
             "path": p,
             "exists": Path(p).is_file(),
             "loadable": ok,
-            "width": int(img.shape[1]) if ok else None,
-            "height": int(img.shape[0]) if ok else None,
+            "width": w,
+            "height": h,
         })
     return info
 
@@ -339,7 +385,8 @@ def _run_labels(
     """
     # system=공통 지시(DETECT_PROMPT), user=라벨별 판정 질문.
     # 질문을 user 메시지에 둬야 모델이 제대로 판정한다(개별 debug와 동일 구조).
-    items = [(DETECT_PROMPT, _single_label_user_prompt(label)) for label in target_labels]
+    n_images = len(image_paths)
+    items = [(DETECT_PROMPT, _single_label_user_prompt(label, n_images)) for label in target_labels]
     raws = _run_vlm_batch(image_paths, items)
 
     labels: list[str] = []
@@ -384,9 +431,12 @@ async def analyze(req: AnalyzeRequest):
     # 라벨 5개를 한 번의 배치로 모델에 넣는다(리사이즈는 1회).
     async with _lock:
         image_paths = await asyncio.to_thread(_resize_frames, frames, request_id)
-        labels, raw_by_label = await asyncio.to_thread(
-            _run_labels, image_paths, LABELS,
-        )
+        try:
+            labels, raw_by_label = await asyncio.to_thread(
+                _run_labels, image_paths, LABELS,
+            )
+        finally:
+            await asyncio.to_thread(_cleanup_resized, request_id)
 
     elapsed = time.perf_counter() - t0
     tts = _build_tts(labels)
@@ -421,6 +471,7 @@ async def v1_debug(req: AnalyzeRequest):
     elapsed = time.perf_counter() - t0
 
     images = await asyncio.to_thread(_inspect_images, image_paths)
+    await asyncio.to_thread(_cleanup_resized, request_id)
 
     return {
         "request_id": request_id,
@@ -467,6 +518,7 @@ async def safety_debug(req: SafetyDebugRequest):
     elapsed = time.perf_counter() - t0
 
     images = await asyncio.to_thread(_inspect_images, image_paths)
+    await asyncio.to_thread(_cleanup_resized, request_id)
 
     log.info("safety/debug 완료 | req=%s | %.2fs", request_id, elapsed)
 
@@ -507,6 +559,7 @@ async def vlm(req: VLMRequest):
         raw = await asyncio.to_thread(
             _run_vlm, image_paths, req.prompt, system_prompt,
         )
+    await asyncio.to_thread(_cleanup_resized, request_id)
     elapsed = time.perf_counter() - t0
 
     log.info("vlm 완료 | req=%s | %.2fs", request_id, elapsed)
