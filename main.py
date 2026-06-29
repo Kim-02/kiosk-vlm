@@ -30,6 +30,12 @@ _FRAME_RE = re.compile(r"^frame_(\d+)$|^frame(\d+)$")
 # ── 라벨 정의 (후처리용 고정 키) ─────────────────────────────────────────────
 LABELS = ["cone_touch", "helmet_off", "fence_crossing", "ladder_alone", "safety_vest"]
 
+# 2단계 파이프라인 라벨.
+# 1단계: 안전모/조끼 착용 여부(PPE)를 먼저 감시한다.
+# 2단계: 1단계를 통과(PPE 정상 착용)했을 때만 행동 3종을 감시한다.
+STAGE1_LABELS = ["helmet_off", "safety_vest"]
+STAGE2_LABELS = ["cone_touch", "fence_crossing", "ladder_alone"]
+
 # 행동별 제지 TTS 문구. 여러 개 감지되면 이어붙인다.
 TTS_PHRASE = {
     "helmet_off": "안전모를 착용하세요.",
@@ -312,6 +318,31 @@ def _build_tts(labels: list[str]) -> str:
     return "안전 이상이 발생했습니다. " + " ".join(phrases)
 
 
+def _run_stage(
+    image_paths: list[str],
+    stage_labels: list[str],
+) -> tuple[list[Detection], dict[str, str]]:
+    """한 단계의 라벨들을 한 번의 배치로 추론하고 위반 목록을 만든다.
+
+    반환: (감지된 Detection 목록, 라벨별 원문 dict). 추론이 무거우므로
+    호출자는 asyncio.to_thread로 감싼다.
+    """
+    items = [(_single_label_system_prompt(label), DETECT_PROMPT) for label in stage_labels]
+    raws = _run_vlm_batch(image_paths, items)
+
+    details: list[Detection] = []
+    raw_by_label: dict[str, str] = {}
+    for label, raw in zip(stage_labels, raws):
+        raw_by_label[label] = raw.strip()
+        answer = _parse_bool(raw)  # 모델이 답한 true/false (None=판정 불가)
+        # 라벨마다 위반을 의미하는 답이 다르다(VIOLATION_WHEN).
+        present = answer is not None and answer == VIOLATION_WHEN[label]
+        log.info("  라벨=%s | answer=%s | present=%s", label, answer, present)
+        if present:
+            details.append(Detection(label=label, evidence=raw.strip()))
+    return details, raw_by_label
+
+
 def _validate_and_select(dir_path: str) -> list[Path]:
     num_frames = cfg_module.get().NUM_FRAMES
     folder = Path(dir_path)
@@ -329,37 +360,45 @@ def _validate_and_select(dir_path: str) -> list[Path]:
 # ── 엔드포인트 ───────────────────────────────────────────────────────────────
 @app.post("/analyze", response_model=DetectResponse)
 async def analyze(req: AnalyzeRequest):
-    """라벨별 판정을 한 번의 배치 추론으로 처리한 뒤, 탐지 결과를 합쳐 TTS를 만든다."""
+    """2단계 파이프라인으로 판정한다.
+
+    1단계: 안전모/조끼(PPE) 미착용을 감시한다. 위반이 있으면 그것만 보고하고 멈춘다.
+    2단계: 1단계를 통과하면(PPE 정상) 행동 3종을 감시한다.
+    """
     frames = _validate_and_select(req.dir_path)
     request_id = str(uuid.uuid4())[:8]
 
-    log.info("analyze 시작 | req=%s | 폴더=%s | 프레임=%d | 라벨=%d종",
-             request_id, req.dir_path, len(frames), len(LABELS))
+    log.info("analyze 시작 | req=%s | 폴더=%s | 프레임=%d",
+             request_id, req.dir_path, len(frames))
     t0 = time.perf_counter()
 
-    details: list[Detection] = []
-    raw_by_label: dict[str, str] = {}
-
-    # 라벨 5개를 한 번의 배치로 모델에 넣는다(리사이즈는 1회).
+    # 리사이즈는 한 번만 하고 두 단계가 같은 이미지를 재사용한다.
     async with _lock:
         image_paths = await asyncio.to_thread(_resize_frames, frames, request_id)
-        items = [(_single_label_system_prompt(label), DETECT_PROMPT) for label in LABELS]
-        raws = await asyncio.to_thread(_run_vlm_batch, image_paths, items)
 
-    for label, raw in zip(LABELS, raws):
-        raw_by_label[label] = raw.strip()
-        answer = _parse_bool(raw)  # 모델이 답한 true/false (None=판정 불가)
-        # 라벨마다 위반을 의미하는 답이 다르다(VIOLATION_WHEN).
-        present = answer is not None and answer == VIOLATION_WHEN[label]
-        log.info("  라벨=%s | answer=%s | present=%s", label, answer, present)
-        if present:
-            details.append(Detection(label=label, evidence=raw.strip()))
+        # 1단계: PPE(안전모/조끼) 미착용 감시
+        log.info("  [1단계] PPE 감시 | req=%s | 라벨=%s", request_id, STAGE1_LABELS)
+        details, raw_by_label = await asyncio.to_thread(
+            _run_stage, image_paths, STAGE1_LABELS,
+        )
+        stage = 1
+
+        # 1단계 통과(PPE 위반 없음)일 때만 2단계 행동 감시로 넘어간다.
+        if not details:
+            stage = 2
+            log.info("  [2단계] 행동 감시 | req=%s | 라벨=%s", request_id, STAGE2_LABELS)
+            s2_details, s2_raw = await asyncio.to_thread(
+                _run_stage, image_paths, STAGE2_LABELS,
+            )
+            details = s2_details
+            raw_by_label.update(s2_raw)
 
     elapsed = time.perf_counter() - t0
-    labels = [det.label for det in details]  # LABELS 순서로 누적됨
+    labels = [det.label for det in details]
     tts = _build_tts(labels)
 
-    log.info("analyze 완료 | req=%s | %.2fs | labels=%s", request_id, elapsed, labels)
+    log.info("analyze 완료 | req=%s | %.2fs | 단계=%d | labels=%s",
+             request_id, elapsed, stage, labels)
 
     return DetectResponse(
         request_id=request_id,
