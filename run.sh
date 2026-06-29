@@ -8,9 +8,11 @@ export EDGELLM_PLUGIN_PATH="/home/ds/edge_llm/TensorRT-Edge-LLM/build/libNvInfer
 
 cd "$(dirname "$0")"
 
-python3 main.py 2> >(awk '
-  !/FMHA DEBUG/ &&
-  !/FMHA SELECTED/ &&
-  !/FMHA FUNC ATTR: result=0/ &&
-  !/Switching optimization profile/
-' >&2)
+# 디버깅: stderr 필터 임시 해제 (전체 로그/traceback 확인용)
+python3 main.py
+# python3 main.py 2> >(awk '
+#   !/FMHA DEBUG/ &&
+#   !/FMHA SELECTED/ &&
+#   !/FMHA FUNC ATTR: result=0/ &&
+#   !/Switching optimization profile/
+# ' >&2)
