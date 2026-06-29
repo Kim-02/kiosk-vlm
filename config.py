@@ -19,7 +19,7 @@ class AppConfig(BaseModel):
 
     # ── 프레임 처리 ──────────────────────────────────────────────────────────
     NUM_FRAMES: int = 1
-    FRAME_SIZE: int = 1024
+    FRAME_SIZE: int = 1280
     JPEG_QUALITY: int = 95
     RESIZE_TMP_DIR: str = "/tmp/vlm_resized"
 
