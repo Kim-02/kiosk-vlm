@@ -130,17 +130,11 @@ class VLMRequest(BaseModel):
     system_prompt: str | None = None
 
 
-class Detection(BaseModel):
-    label: str
-    evidence: str
-
-
 class DetectResponse(BaseModel):
     request_id: str
     detected: bool
     labels: list[str]
     tts_message: str
-    details: list[Detection]
     raw: str
     elapsed_sec: float
 
@@ -321,26 +315,26 @@ def _build_tts(labels: list[str]) -> str:
 def _run_stage(
     image_paths: list[str],
     stage_labels: list[str],
-) -> tuple[list[Detection], dict[str, str]]:
-    """한 단계의 라벨들을 한 번의 배치로 추론하고 위반 목록을 만든다.
+) -> tuple[list[str], dict[str, str]]:
+    """한 단계의 라벨들을 한 번의 배치로 추론하고 위반 라벨 목록을 만든다.
 
-    반환: (감지된 Detection 목록, 라벨별 원문 dict). 추론이 무거우므로
+    반환: (위반 라벨 목록, 라벨별 true/false 원문 dict). 추론이 무거우므로
     호출자는 asyncio.to_thread로 감싼다.
     """
     items = [(_single_label_system_prompt(label), DETECT_PROMPT) for label in stage_labels]
     raws = _run_vlm_batch(image_paths, items)
 
-    details: list[Detection] = []
+    labels: list[str] = []
     raw_by_label: dict[str, str] = {}
     for label, raw in zip(stage_labels, raws):
         raw_by_label[label] = raw.strip()
         answer = _parse_bool(raw)  # 모델이 답한 true/false (None=판정 불가)
         # 라벨마다 위반을 의미하는 답이 다르다(VIOLATION_WHEN).
-        present = answer is not None and answer == VIOLATION_WHEN[label]
-        log.info("  라벨=%s | answer=%s | present=%s", label, answer, present)
-        if present:
-            details.append(Detection(label=label, evidence=raw.strip()))
-    return details, raw_by_label
+        violated = answer is not None and answer == VIOLATION_WHEN[label]
+        log.info("  라벨=%s | answer=%s | violated=%s", label, answer, violated)
+        if violated:
+            labels.append(label)
+    return labels, raw_by_label
 
 
 def _validate_and_select(dir_path: str) -> list[Path]:
@@ -378,23 +372,21 @@ async def analyze(req: AnalyzeRequest):
 
         # 1단계: PPE(안전모/조끼) 미착용 감시
         log.info("  [1단계] PPE 감시 | req=%s | 라벨=%s", request_id, STAGE1_LABELS)
-        details, raw_by_label = await asyncio.to_thread(
+        labels, raw_by_label = await asyncio.to_thread(
             _run_stage, image_paths, STAGE1_LABELS,
         )
         stage = 1
 
         # 1단계 통과(PPE 위반 없음)일 때만 2단계 행동 감시로 넘어간다.
-        if not details:
+        if not labels:
             stage = 2
             log.info("  [2단계] 행동 감시 | req=%s | 라벨=%s", request_id, STAGE2_LABELS)
-            s2_details, s2_raw = await asyncio.to_thread(
+            labels, s2_raw = await asyncio.to_thread(
                 _run_stage, image_paths, STAGE2_LABELS,
             )
-            details = s2_details
             raw_by_label.update(s2_raw)
 
     elapsed = time.perf_counter() - t0
-    labels = [det.label for det in details]
     tts = _build_tts(labels)
 
     log.info("analyze 완료 | req=%s | %.2fs | 단계=%d | labels=%s",
@@ -402,10 +394,9 @@ async def analyze(req: AnalyzeRequest):
 
     return DetectResponse(
         request_id=request_id,
-        detected=bool(details),
+        detected=bool(labels),
         labels=labels,
         tts_message=tts,
-        details=details,
         raw=json.dumps(raw_by_label, ensure_ascii=False),
         elapsed_sec=round(elapsed, 3),
     )
