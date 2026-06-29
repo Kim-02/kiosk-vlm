@@ -274,8 +274,12 @@ _BOOL_RE = re.compile(r"\b(true|false|yes|no)\b", re.IGNORECASE)
 _TRUE_TOKENS = {"true", "yes"}
 
 
-def _single_label_system_prompt(label: str) -> str:
-    """라벨 하나만 판정하도록 좁힌 시스템 프롬프트."""
+def _single_label_user_prompt(label: str) -> str:
+    """라벨 하나만 판정하도록 좁힌 유저 프롬프트.
+
+    VLM 챗 템플릿이 마지막 user 메시지를 핵심 지시로 보므로, 실제 판정 질문은
+    system이 아니라 user 메시지로 보낸다(시스템 프롬프트는 DETECT_PROMPT 사용).
+    """
     return (
         "Images are consecutive CCTV frames; analyze them as one sequence. "
         "If no person is visible, return [] immediately. "
@@ -335,7 +339,9 @@ def _run_stage(
     반환: (위반 라벨 목록, 라벨별 true/false 원문 dict). 추론이 무거우므로
     호출자는 asyncio.to_thread로 감싼다.
     """
-    items = [(_single_label_system_prompt(label), DETECT_PROMPT) for label in stage_labels]
+    # system=공통 지시(DETECT_PROMPT), user=라벨별 판정 질문.
+    # 질문을 user 메시지에 둬야 모델이 제대로 판정한다(개별 debug와 동일 구조).
+    items = [(DETECT_PROMPT, _single_label_user_prompt(label)) for label in stage_labels]
     raws = _run_vlm_batch(image_paths, items)
 
     labels: list[str] = []
