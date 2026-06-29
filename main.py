@@ -58,13 +58,6 @@ VIOLATION_WHEN = {
     "safety_vest": False,     # "안전 조끼 착용?" → 미착용(false)이 위반
 }
 
-# 사람 존재 여부 사전 점검용 시스템 프롬프트.
-# 5라벨 배치 전에 1회 추론해, 사람이 없으면 즉시 빈 리스트를 반환한다.
-PERSON_SYSTEM_PROMPT = (
-    "Images are consecutive CCTV frames; analyze them as one sequence. "
-    "Is there any person visible on the screen? just tell true or false."
-)
-
 # ── 판정 프롬프트 (라벨별 단일 판정의 유저 프롬프트) ─────────────────────────
 DETECT_PROMPT = (
     "Check all frames and decide if the specified situation is present."
@@ -350,29 +343,6 @@ async def analyze(req: AnalyzeRequest):
     # 라벨 5개를 한 번의 배치로 모델에 넣는다(리사이즈는 1회).
     async with _lock:
         image_paths = await asyncio.to_thread(_resize_frames, frames, request_id)
-
-        # ① 사람이 보이는지 먼저 1회 추론한다.
-        person_raw = await asyncio.to_thread(
-            _run_vlm, image_paths, DETECT_PROMPT, PERSON_SYSTEM_PROMPT,
-        )
-        person_present = _parse_bool(person_raw)
-        log.info("사람 감지 | req=%s | answer=%s", request_id, person_present)
-
-        # 사람이 없으면(False/None) 안전 이상 없음으로 즉시 반환한다.
-        if person_present is not True:
-            elapsed = time.perf_counter() - t0
-            log.info("analyze 완료(사람 없음) | req=%s | %.2fs", request_id, elapsed)
-            return DetectResponse(
-                request_id=request_id,
-                detected=False,
-                labels=[],
-                tts_message=_build_tts([]),
-                details=[],
-                raw=json.dumps({"person": person_raw.strip()}, ensure_ascii=False),
-                elapsed_sec=round(elapsed, 3),
-            )
-
-        # ② 사람이 있을 때만 5라벨 배치 추론을 수행한다.
         items = [(_single_label_system_prompt(label), DETECT_PROMPT) for label in LABELS]
         raws = await asyncio.to_thread(_run_vlm_batch, image_paths, items)
 
