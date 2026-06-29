@@ -48,7 +48,7 @@ TTS_PHRASE = {
 # 라벨별 단일 판정 기준. 한 요청당 라벨마다 개별 추론을 돌릴 때 사용한다.
 LABEL_CRITERIA = {
     "helmet_off": "Is the worker on the screen wearing a red hard hat? tell true or false",
-    "cone_touch": "Is the worker bending down to pick up an orange traffic cone? just tell true or false",
+    "cone_touch": "Is the worker leaning over an orange traffic cone? just tell true or false",
     "fence_crossing": "Is there someone to the left of the yellow fence? just tell true or false",
     "ladder_alone": "Is there a worker on the screen climbing a green ladder alone? just tell true or false",
     "safety_vest": "Is the worker on the screen wearing a safety vest? just tell true or false",
