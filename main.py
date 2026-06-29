@@ -254,8 +254,6 @@ def _run_vlm_batch(
         "배치 추론 시작 | 배치=%d | 이미지=%d장 | image_buffers=%d | max_tokens=%d",
         len(batch_messages), len(image_paths), len(image_buffers), cfg.MAX_TOKENS,
     )
-    # ViT에 실제로 들어가는 이미지의 경로/크기를 박아 리사이즈 반영 여부를 확인한다.
-    log.info("ViT 입력 점검 | %s", _inspect_images(image_paths))
 
     response = _runtime.handle_request(gen_req)
     outs = list(response.output_texts) if response.output_texts else []
