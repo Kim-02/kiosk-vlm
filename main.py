@@ -28,25 +28,24 @@ FRAME_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
 _FRAME_RE = re.compile(r"^frame_(\d+)$|^frame(\d+)$")
 
 # ── 라벨 정의 (후처리용 고정 키) ─────────────────────────────────────────────
-# 현재는 '라바콘 접촉'만 탐지. (다른 라벨이 모델에서 나와도 후처리에서 걸러진다)
 LABELS = ["cone_touch", "helmet_off", "fence_crossing", "ladder_alone", "safety_vest"]
 
 # 행동별 제지 TTS 문구. 여러 개 감지되면 이어붙인다.
 TTS_PHRASE = {
     "helmet_off": "안전모를 착용하세요.",
     "cone_touch": "라바콘에서 손을 떼세요.",
-    "fence_crossing": "위험 펜스를 넘지 마세요.",
+    "fence_crossing": "위험 지역에 들어가지 마세요.",
     "ladder_alone": "사다리를 혼자 사용하지 마세요. 보조자를 배치하세요.",
-    "safety_vest": "안전 고리를 착용하세요.",
+    "safety_vest": "안전 조끼를 착용하세요.",
 }
 
 # 라벨별 단일 판정 기준. 한 요청당 라벨마다 개별 추론을 돌릴 때 사용한다.
 LABEL_CRITERIA = {
     "helmet_off": "Is the worker on the screen wearing a red hard hat? tell true or false",
     "cone_touch": "Is there a worker touching an orange construction cone on the screen? just tell true or false",
-    "fence_crossing": "Is there a worker clearly standing on, stepping on, or crossing an expandable safety rail? just tell true or false",
+    "fence_crossing": "Is there someone to the left of the yellow fence? just tell true or false",
     "ladder_alone": "Is there a worker on the screen climbing a green ladder alone? just tell true or false",
-    "safety_vest": "Is the worker on the screen wearing a safety hook? just tell true or false",
+    "safety_vest": "Is the worker on the screen wearing a safety vest? just tell true or false",
 }
 
 # 라벨별로 '위반(present)'을 의미하는 모델 응답.
@@ -56,7 +55,7 @@ VIOLATION_WHEN = {
     "cone_touch": True,       # "콘 접촉?" → 접촉(true)이 위반
     "fence_crossing": True,   # "펜스 넘음?" → 넘음(true)이 위반
     "ladder_alone": True,     # "사다리 단독 사용?" → 단독(true)이 위반
-    "safety_vest": False,     # "안전 고리 착용?" → 미착용(false)이 위반
+    "safety_vest": False,     # "안전 조끼 착용?" → 미착용(false)이 위반
 }
 
 # ── 판정 프롬프트 (라벨별 단일 판정의 유저 프롬프트) ─────────────────────────
