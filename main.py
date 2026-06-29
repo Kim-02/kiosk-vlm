@@ -41,11 +41,11 @@ TTS_PHRASE = {
 
 # 라벨별 단일 판정 기준. 한 요청당 라벨마다 개별 추론을 돌릴 때 사용한다.
 LABEL_CRITERIA = {
-    "helmet_off": "Is the worker on the screen wearing a red hard hat? tell true or false",
-    "cone_touch": "Is the worker touch an orange traffic cone? just tell true or false",
-    "fence_crossing": "Is there someone to the left of the yellow fence? just tell true or false",
-    "ladder_alone": "Is there a worker on the screen climbing a green ladder alone? just tell true or false",
-    "safety_vest": "Is the worker on the screen wearing a safety vest? just tell true or false",
+    "helmet_off": "Did all the workers wear hard hats? tell true or false or none",
+    "cone_touch": "Is the worker touch an orange traffic cone? just tell true or false or none",
+    "fence_crossing": "Is there someone to the left of the yellow fence? just tell true or false or none",
+    "ladder_alone": "Is the worker using the green ladder alone? just tell true or false or none",
+    "safety_vest": "Did all the workers wear safety vests? just tell true or false or none",
 }
 
 # 라벨별로 '위반(present)'을 의미하는 모델 응답.
@@ -276,7 +276,7 @@ def _single_label_user_prompt(label: str) -> str:
     """
     return (
         "Images are consecutive CCTV frames; analyze them as one sequence. "
-        "If no person is visible, return [] immediately. "
+        "If no person is visible, return none immediately. "
         f"{LABEL_CRITERIA[label]}."
     )
 
@@ -285,11 +285,11 @@ def _parse_bool(raw: str) -> bool | None:
     """모델 응답 텍스트에서 첫 번째 긍정/부정 판정을 추출.
 
     true/yes는 True, false/no는 False로 본다.
-    사람이 없으면 모델이 '[]'를 반환하므로 None(위반 아님)으로 처리한다.
+    사람이 없으면 모델이 'none'을 반환하므로 None(위반 아님)으로 처리한다.
     그 외에 판정 토큰을 찾지 못해도 None을 반환한다(판정 불가).
     """
     text = raw.strip()
-    if "[]" in text:
+    if "none" in text:
         return None  # 사람 없음 → 판정 대상 없음
     m = _BOOL_RE.search(text)
     if not m:
