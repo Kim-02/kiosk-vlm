@@ -264,8 +264,11 @@ def _run_vlm(
     return _run_vlm_batch(image_paths, [(system_prompt, prompt)])[0]
 
 
-# 모델 응답에서 true/false 토큰을 잡아낸다(대소문자 무시).
-_BOOL_RE = re.compile(r"\b(true|false)\b", re.IGNORECASE)
+# 모델 응답에서 긍정/부정 토큰을 잡아낸다(대소문자 무시).
+# 모델이 true/false 대신 yes/no로 답할 때가 있어 둘 다 인식한다.
+_BOOL_RE = re.compile(r"\b(true|false|yes|no)\b", re.IGNORECASE)
+# 긍정(True)으로 취급하는 토큰.
+_TRUE_TOKENS = {"true", "yes"}
 
 
 def _single_label_system_prompt(label: str) -> str:
@@ -278,10 +281,11 @@ def _single_label_system_prompt(label: str) -> str:
 
 
 def _parse_bool(raw: str) -> bool | None:
-    """모델 응답 텍스트에서 첫 번째 true/false 판정을 추출.
+    """모델 응답 텍스트에서 첫 번째 긍정/부정 판정을 추출.
 
+    true/yes는 True, false/no는 False로 본다.
     사람이 없으면 모델이 '[]'를 반환하므로 None(위반 아님)으로 처리한다.
-    그 외에 true/false 토큰을 찾지 못해도 None을 반환한다(판정 불가).
+    그 외에 판정 토큰을 찾지 못해도 None을 반환한다(판정 불가).
     """
     text = raw.strip()
     if "[]" in text:
@@ -290,7 +294,7 @@ def _parse_bool(raw: str) -> bool | None:
     if not m:
         log.warning("true/false 파싱 실패, 원문=%s", raw[:200])
         return None
-    return m.group(1).lower() == "true"
+    return m.group(1).lower() in _TRUE_TOKENS
 
 
 def _inspect_images(paths: list[str]) -> list[dict]:
