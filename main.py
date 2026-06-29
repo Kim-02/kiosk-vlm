@@ -252,6 +252,9 @@ def _run_vlm_batch(
         outs += [""] * (expected - len(outs))
 
     log.info("배치 추론 완료 | 출력=%d개", len(outs))
+    # 배치 항목별 모델 원문을 그대로 찍는다(개별 테스트와 배치 결과 비교용).
+    for i, out in enumerate(outs):
+        log.info("배치 응답[%d/%d] | %r", i, len(outs), out.strip())
     return outs
 
 
@@ -342,7 +345,8 @@ def _run_stage(
         answer = _parse_bool(raw)  # 모델이 답한 true/false (None=판정 불가)
         # 라벨마다 위반을 의미하는 답이 다르다(VIOLATION_WHEN).
         violated = answer is not None and answer == VIOLATION_WHEN[label]
-        log.info("  라벨=%s | answer=%s | violated=%s", label, answer, violated)
+        log.info("  라벨=%s | answer=%s | violated=%s | 원문=%r",
+                 label, answer, violated, raw.strip())
         if violated:
             labels.append(label)
     return labels, raw_by_label
