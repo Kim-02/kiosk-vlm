@@ -63,6 +63,9 @@ DETECT_PROMPT = (
     "Look at the image and decide if the specified situation is present."
 )
 
+# 5배치 전 사전 점검: 사람이 있는지 먼저 묻는다(true/false).
+PERSON_CRITERIA = "Is there any person? just tell true or false"
+
 CHECK_PROMPT = (
     "화면에 보이는걸 모두 설명해라."
 )
@@ -294,24 +297,23 @@ _BOOL_RE = re.compile(r"\b(true|false|yes|no)\b", re.IGNORECASE)
 _TRUE_TOKENS = {"true", "yes"}
 
 
+def _frame_context(n_images: int) -> str:
+    """입력 프레임 수에 맞춰 단일/다중 프레임 맥락 문구를 만든다."""
+    if n_images <= 1:
+        return "This is a single CCTV image."
+    return (
+        f"These are {n_images} consecutive CCTV frames; "
+        "analyze them as one sequence."
+    )
+
+
 def _single_label_user_prompt(label: str, n_images: int = 1) -> str:
     """라벨 하나만 판정하도록 좁힌 유저 프롬프트.
 
     VLM 챗 템플릿이 마지막 user 메시지를 핵심 지시로 보므로, 실제 판정 질문은
     system이 아니라 user 메시지로 보낸다(시스템 프롬프트는 DETECT_PROMPT 사용).
-    입력 프레임 수에 맞춰 단일/다중 프레임 맥락을 정확히 알려준다.
     """
-    if n_images <= 1:
-        context = "This is a single CCTV image."
-    else:
-        context = (
-            f"These are {n_images} consecutive CCTV frames; "
-            "analyze them as one sequence."
-        )
-    return (
-        f"{context} "
-        f"{LABEL_CRITERIA[label]}."
-    )
+    return f"{_frame_context(n_images)} {LABEL_CRITERIA[label]}."
 
 
 def _parse_bool(raw: str) -> bool | None:
@@ -370,15 +372,35 @@ def _build_tts(labels: list[str]) -> str:
     return "안전 이상이 발생했습니다. " + " ".join(phrases)
 
 
+def _has_person(image_paths: list[str]) -> bool:
+    """5배치 전에 사람 존재 여부를 단일 추론으로 확인한다.
+
+    모델이 true/false로 답하며, true일 때만 사람이 있는 것으로 본다
+    (false/판정불가 모두 사람 없음으로 간주).
+    """
+    prompt = f"{_frame_context(len(image_paths))} {PERSON_CRITERIA}"
+    raw = _run_vlm(image_paths, prompt, DETECT_PROMPT)
+    answer = _parse_bool(raw)
+    log.info("  사람 존재 확인 | answer=%s | 원문=%r", answer, raw.strip())
+    return answer is True
+
+
 def _run_labels(
     image_paths: list[str],
     target_labels: list[str],
 ) -> tuple[list[str], dict[str, str]]:
     """라벨들을 한 번의 배치로 추론하고 위반 라벨 목록을 만든다.
 
-    반환: (위반 라벨 목록, 라벨별 true/false 원문 dict). 추론이 무거우므로
-    호출자는 asyncio.to_thread로 감싼다.
+    먼저 사람 존재 여부를 1회 추론으로 확인하고, 사람이 없으면 5배치를
+    돌리지 않고 위반 없음으로 끝낸다. 추론이 무거우므로 호출자는
+    asyncio.to_thread로 감싼다.
+    반환: (위반 라벨 목록, 라벨별 true/false 원문 dict).
     """
+    # 사람이 없으면 안전 위반도 없는 것과 동일한 상태 → 배치 생략.
+    if not _has_person(image_paths):
+        log.info("  사람 없음 → 라벨 판정 생략")
+        return [], {}
+
     # system=공통 지시(DETECT_PROMPT), user=라벨별 판정 질문.
     # 질문을 user 메시지에 둬야 모델이 제대로 판정한다(개별 debug와 동일 구조).
     n_images = len(image_paths)
@@ -386,8 +408,6 @@ def _run_labels(
     raws = _run_vlm_batch(image_paths, items)
 
     # 라벨별로 위반 여부를 집계한다.
-    # 모든 라벨이 정상(위반 없음)이면 빈 목록이 되며, 이는 "사람 없음"과
-    # "안전 이상 없음"이 동일한 상태임을 의미한다(둘 다 위반 라벨이 없음).
     labels: list[str] = []
     raw_by_label: dict[str, str] = {}
     for label, raw in zip(target_labels, raws):
