@@ -41,11 +41,11 @@ TTS_PHRASE = {
 
 # 라벨별 단일 판정 기준. 한 요청당 라벨마다 개별 추론을 돌릴 때 사용한다.
 LABEL_CRITERIA = {
-    "helmet_off": "Did all the workers wear red hard hats? just tell true or false or none",
-    "cone_touch": "Is the worker touch an orange traffic cone? just tell true or false or none",
-    "fence_crossing": "Is there at least one person to the left of the yellow fence? just tell true or false or none",
-    "ladder_alone": "This is a single CCTV image. If no person is visible, return none immediately. Is there anyone who uses a ladder alone? just tell true or false or none",
-    "safety_vest": "Did all the workers wear safety vests? just tell true or false or none",
+    "helmet_off": "Did all the workers wear hard hats? just tell true or false",
+    "cone_touch": "Is the worker touch an orange traffic cone? just tell true or false",
+    "fence_crossing": "Is there at least one person to the left of the yellow fence? just tell true or false",
+    "ladder_alone": "Is there anyone who uses a ladder alone? just tell true or false",
+    "safety_vest": "Did all the workers wear safety vests? just tell true or false",
 }
 
 # 라벨별로 '위반(present)'을 의미하는 모델 응답.
@@ -310,7 +310,6 @@ def _single_label_user_prompt(label: str, n_images: int = 1) -> str:
         )
     return (
         f"{context} "
-        "If no person is visible, return none immediately. "
         f"{LABEL_CRITERIA[label]}."
     )
 
@@ -319,13 +318,9 @@ def _parse_bool(raw: str) -> bool | None:
     """모델 응답 텍스트에서 첫 번째 긍정/부정 판정을 추출.
 
     true/yes는 True, false/no는 False로 본다.
-    사람이 없으면 모델이 'none'을 반환하므로 None(위반 아님)으로 처리한다.
-    그 외에 판정 토큰을 찾지 못해도 None을 반환한다(판정 불가).
+    판정 토큰을 찾지 못하면 None을 반환한다(판정 불가 → 위반 아님).
     """
-    text = raw.strip()
-    if "none" in text:
-        return None  # 사람 없음 → 판정 대상 없음
-    m = _BOOL_RE.search(text)
+    m = _BOOL_RE.search(raw)
     if not m:
         log.warning("true/false 파싱 실패, 원문=%s", raw[:200])
         return None
@@ -390,11 +385,14 @@ def _run_labels(
     items = [(DETECT_PROMPT, _single_label_user_prompt(label, n_images)) for label in target_labels]
     raws = _run_vlm_batch(image_paths, items)
 
+    # 라벨별로 위반 여부를 집계한다.
+    # 모든 라벨이 정상(위반 없음)이면 빈 목록이 되며, 이는 "사람 없음"과
+    # "안전 이상 없음"이 동일한 상태임을 의미한다(둘 다 위반 라벨이 없음).
     labels: list[str] = []
     raw_by_label: dict[str, str] = {}
     for label, raw in zip(target_labels, raws):
         raw_by_label[label] = raw.strip()
-        answer = _parse_bool(raw)  # 모델이 답한 true/false (None=판정 불가)
+        answer = _parse_bool(raw)  # True/False (None=판정 불가)
         # 라벨마다 위반을 의미하는 답이 다르다(VIOLATION_WHEN).
         violated = answer is not None and answer == VIOLATION_WHEN[label]
         log.info("  라벨=%s | answer=%s | violated=%s | 원문=%r",
