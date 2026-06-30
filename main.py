@@ -44,7 +44,7 @@ LABEL_CRITERIA = {
     "helmet_off": "Did all the workers wear red hard hats? just tell true or false or none",
     "cone_touch": "Is the worker touch an orange traffic cone? just tell true or false or none",
     "fence_crossing": "Is there at least one person to the left of the yellow fence? just tell true or false or none",
-    "ladder_alone": "Is the worker using the green ladder alone? just tell true or false or none",
+    "ladder_alone": "This is a single CCTV image. If no person is visible, return none immediately. Is there anyone who uses a ladder alone? just tell true or false or none",
     "safety_vest": "Did all the workers wear safety vests? just tell true or false or none",
 }
 
