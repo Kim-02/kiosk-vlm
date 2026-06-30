@@ -137,9 +137,19 @@ Uvicorn running on http://0.0.0.0:8000
 | 필드 | 타입 | 필수 | 설명 |
 |------|------|:----:|------|
 | `dir_path` | string | ✅ | 프레임 이미지가 있는 폴더의 절대 경로 |
+| `labels` | string[] | ❌ | 이 요청에서 판정할 라벨 목록. 미지정/빈 목록이면 5종 전체를 판정. 지원하지 않는 라벨이 섞이면 `400` 에러 |
 
 ```json
 { "dir_path": "/home/ds/Desktop/kiosk-vlm/frames" }
+```
+
+특정 상황만 판정하려면 `labels`로 대상을 좁힙니다(반환 순서는 라벨 정의 순서로 정규화됩니다).
+
+```json
+{
+  "dir_path": "/home/ds/Desktop/kiosk-vlm/frames",
+  "labels": ["helmet_off", "ladder_alone"]
+}
 ```
 
 **Response** (`DetectResponse`)
@@ -165,9 +175,15 @@ Uvicorn running on http://0.0.0.0:8000
 | `elapsed_sec` | 리사이즈+추론 전체 소요 시간(초) |
 
 ```bash
+# 5종 전체 판정
 curl -X POST "http://localhost:8000/analyze" \
   -H "Content-Type: application/json" \
   -d '{"dir_path": "/home/ds/Desktop/kiosk-vlm/frames"}'
+
+# 특정 라벨만 판정
+curl -X POST "http://localhost:8000/analyze" \
+  -H "Content-Type: application/json" \
+  -d '{"dir_path": "/home/ds/Desktop/kiosk-vlm/frames", "labels": ["helmet_off", "ladder_alone"]}'
 ```
 
 ---

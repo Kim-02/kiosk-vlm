@@ -123,6 +123,9 @@ app = FastAPI(title="DueGo VLM Server", lifespan=lifespan)
 # ── 스키마 ────────────────────────────────────────────────────────────────────
 class AnalyzeRequest(BaseModel):
     dir_path: str
+    # 이 요청에서 판정할 라벨 목록. 미지정/빈 목록이면 LABELS 전체를 판정한다.
+    # (/v1/debug 도 이 스키마를 쓰지만 labels 는 사용하지 않는다.)
+    labels: list[str] | None = None
 
 
 class VLMRequest(BaseModel):
@@ -401,6 +404,24 @@ def _run_labels(
     return labels, raw_by_label
 
 
+def _resolve_labels(requested: list[str] | None) -> list[str]:
+    """요청 labels 를 검증해 실제 판정할 라벨 목록을 만든다.
+
+    미지정/빈 목록이면 LABELS 전체를 판정한다. 알 수 없는 라벨이 섞여 있으면
+    400 으로 거부한다. 반환 순서는 LABELS 정의 순서를 따른다(중복 제거 포함).
+    """
+    if not requested:
+        return list(LABELS)
+    unknown = [lb for lb in requested if lb not in LABELS]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"알 수 없는 라벨: {unknown} (지원: {LABELS})",
+        )
+    requested_set = set(requested)
+    return [lb for lb in LABELS if lb in requested_set]
+
+
 def _validate_and_select(dir_path: str) -> list[Path]:
     num_frames = cfg_module.get().NUM_FRAMES
     folder = Path(dir_path)
@@ -418,20 +439,24 @@ def _validate_and_select(dir_path: str) -> list[Path]:
 # ── 엔드포인트 ───────────────────────────────────────────────────────────────
 @app.post("/analyze", response_model=DetectResponse)
 async def analyze(req: AnalyzeRequest):
-    """라벨 5종을 한 번의 배치로 한꺼번에 판정한 뒤, 위반 결과로 TTS를 만든다."""
+    """요청한 라벨들을 한 번의 배치로 판정한 뒤, 위반 결과로 TTS를 만든다.
+
+    req.labels 로 판정 대상을 좁힐 수 있다. 미지정이면 LABELS 전체를 판정한다.
+    """
+    target_labels = _resolve_labels(req.labels)
     frames = _validate_and_select(req.dir_path)
     request_id = str(uuid.uuid4())[:8]
 
-    log.info("analyze 시작 | req=%s | 폴더=%s | 프레임=%d | 라벨=%d종",
-             request_id, req.dir_path, len(frames), len(LABELS))
+    log.info("analyze 시작 | req=%s | 폴더=%s | 프레임=%d | 라벨=%s",
+             request_id, req.dir_path, len(frames), target_labels)
     t0 = time.perf_counter()
 
-    # 라벨 5개를 한 번의 배치로 모델에 넣는다(리사이즈는 1회).
+    # 요청한 라벨들을 한 번의 배치로 모델에 넣는다(리사이즈는 1회).
     async with _lock:
         image_paths = await asyncio.to_thread(_resize_frames, frames, request_id)
         try:
             labels, raw_by_label = await asyncio.to_thread(
-                _run_labels, image_paths, LABELS,
+                _run_labels, image_paths, target_labels,
             )
         finally:
             await asyncio.to_thread(_cleanup_resized, request_id)
