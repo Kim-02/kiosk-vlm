@@ -129,6 +129,9 @@ class AnalyzeRequest(BaseModel):
     # 이 요청에서 판정할 라벨 목록. 미지정/빈 목록이면 LABELS 전체를 판정한다.
     # (/v1/debug 도 이 스키마를 쓰지만 labels 는 사용하지 않는다.)
     labels: list[str] | None = None
+    # 이 요청이 어떤 공정의 카메라에서 왔는지. TTS 문구 앞에 붙이고 디버그 로그에 남긴다.
+    # 미지정이면 공정 접두 없이 기존과 동일하게 동작한다.
+    process_name: str | None = None
 
 
 class VLMRequest(BaseModel):
@@ -363,13 +366,17 @@ def _inspect_images(paths: list[str]) -> list[dict]:
     return info
 
 
-def _build_tts(labels: list[str]) -> str:
-    """감지된 행동들의 제지 문구를 LABELS 순서대로 이어붙인다."""
+def _build_tts(labels: list[str], process_name: str | None = None) -> str:
+    """감지된 행동들의 제지 문구를 LABELS 순서대로 이어붙인다.
+
+    process_name 이 주어지면 어떤 공정에서 발생했는지 문구 맨 앞에 붙인다.
+    """
+    prefix = f"{process_name} 공정, " if process_name else ""
     if not labels:
-        return "안전 이상이 없습니다."
+        return f"{prefix}안전 이상이 없습니다."
     ordered = [lb for lb in LABELS if lb in labels]
     phrases = [TTS_PHRASE[lb] for lb in ordered]
-    return "안전 이상이 발생했습니다. " + " ".join(phrases)
+    return f"{prefix}안전 이상이 발생했습니다. " + " ".join(phrases)
 
 
 def _has_person(image_paths: list[str]) -> bool:
@@ -464,9 +471,10 @@ async def analyze(req: AnalyzeRequest):
     target_labels = _resolve_labels(req.labels)
     frames = _validate_and_select(req.dir_path)
     request_id = str(uuid.uuid4())[:8]
+    process_name = req.process_name or "(미지정)"
 
-    log.info("analyze 시작 | req=%s | 폴더=%s | 프레임=%d | 라벨=%s",
-             request_id, req.dir_path, len(frames), target_labels)
+    log.info("analyze 시작 | req=%s | 공정=%s | 폴더=%s | 프레임=%d | 라벨=%s",
+             request_id, process_name, req.dir_path, len(frames), target_labels)
     t0 = time.perf_counter()
 
     # 요청한 라벨들을 한 번의 배치로 모델에 넣는다(리사이즈는 1회).
@@ -480,10 +488,10 @@ async def analyze(req: AnalyzeRequest):
             await asyncio.to_thread(_cleanup_resized, request_id)
 
     elapsed = time.perf_counter() - t0
-    tts = _build_tts(labels)
+    tts = _build_tts(labels, req.process_name)
 
-    log.info("analyze 완료 | req=%s | %.2fs | labels=%s",
-             request_id, elapsed, labels)
+    log.info("analyze 완료 | req=%s | 공정=%s | %.2fs | labels=%s",
+             request_id, process_name, elapsed, labels)
 
     return DetectResponse(
         request_id=request_id,
