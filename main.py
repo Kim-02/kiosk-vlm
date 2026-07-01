@@ -77,6 +77,13 @@ DESCRIBE_SYSTEM_PROMPT = (
     "위험/안전을 판정하지 말고, 화면에 실제로 보이는 것만 한국어로 설명하세요."
 )
 
+# /prompt 전용: 프롬프트는 영어여도 응답은 항상 한국어로 나오도록 강제하는 문구.
+# 사용자가 준 system_prompt 뒤에 붙여 언어를 고정한다.
+KOREAN_ONLY_INSTRUCTION = "Regardless of the prompt language, always answer in Korean only. 반드시 한국어로만 답하세요."
+
+# /prompt는 한 문단 설명이 필요하므로 이 요청에 한해 토큰 한도를 늘린다.
+PROMPT_MAX_TOKENS = 256
+
 # ── 런타임 ────────────────────────────────────────────────────────────────────
 _runtime: Any = None
 _edgellm: Any = None
@@ -142,6 +149,13 @@ class VLMRequest(BaseModel):
 
 class SafetyDebugRequest(BaseModel):
     # 이미지 파일 한 장 또는 프레임 폴더 경로 둘 다 허용한다.
+    path: str
+    prompt: str
+    system_prompt: str | None = None
+
+
+class PromptRequest(BaseModel):
+    # 프레임 폴더 경로. 안에서 대표 프레임 한 장을 뽑아 장면을 설명한다.
     path: str
     prompt: str
     system_prompt: str | None = None
@@ -233,19 +247,22 @@ def _build_messages(image_paths: list[str], system_prompt: str, prompt: str) -> 
 def _run_vlm_batch(
     image_paths: list[str],
     items: list[tuple[str, str]],
+    max_tokens: int | None = None,
 ) -> list[str]:
     """같은 이미지에 대해 여러 (system_prompt, prompt) 질의를 한 번의 배치로 추론.
 
     items[i] = (system_prompt, user_prompt). 반환은 items와 같은 순서의 raw 출력 목록.
     리사이즈는 호출자가 _resize_frames로 미리 수행한다.
+    max_tokens를 주면 이 요청에 한해 cfg.MAX_TOKENS 대신 사용한다(예: 설명 API).
     """
     cfg = cfg_module.get()
+    gen_len = max_tokens if max_tokens is not None else cfg.MAX_TOKENS
     batch_messages = [_build_messages(image_paths, sp, pr) for sp, pr in items]
 
     gen_req = _edgellm.create_generation_request(
         batch_messages=batch_messages,
         temperature=cfg.TEMPERATURE,
-        max_generate_length=cfg.MAX_TOKENS,
+        max_generate_length=gen_len,
         top_p=cfg.TOP_P,
         top_k=cfg.TOP_K,
         apply_chat_template=True,
@@ -261,7 +278,7 @@ def _run_vlm_batch(
 
     log.info(
         "배치 추론 시작 | 배치=%d | 이미지=%d장 | image_buffers=%d | max_tokens=%d",
-        len(batch_messages), len(image_paths), len(image_buffers), cfg.MAX_TOKENS,
+        len(batch_messages), len(image_paths), len(image_buffers), gen_len,
     )
 
     response = _runtime.handle_request(gen_req)
@@ -288,9 +305,10 @@ def _run_vlm(
     image_paths: list[str],
     prompt: str,
     system_prompt: str,
+    max_tokens: int | None = None,
 ) -> str:
     """단일 질의 추론. _run_vlm_batch의 1개짜리 래퍼."""
-    return _run_vlm_batch(image_paths, [(system_prompt, prompt)])[0]
+    return _run_vlm_batch(image_paths, [(system_prompt, prompt)], max_tokens)[0]
 
 
 # 모델 응답에서 긍정/부정 토큰을 잡아낸다(대소문자 무시).
@@ -618,6 +636,55 @@ async def vlm(req: VLMRequest):
         "response": raw.strip(),
         "image": str(path),
         "image_fed": image_paths[0] if image_paths else None,
+        "elapsed_sec": round(elapsed, 3),
+    }
+
+
+@app.post("/prompt")
+async def prompt(req: PromptRequest):
+    """프레임 폴더에서 대표 프레임 한 장을 뽑아 지정한 프롬프트로 장면을 설명한다.
+
+    안전판정 파이프라인을 거치지 않고, 입력 프롬프트만으로 현재 장면을 묘사한다.
+    프롬프트가 영어여도 응답은 항상 한국어로 나오도록 강제한다.
+    설명은 한 문단이 필요하므로 이 요청에 한해 토큰 한도를 PROMPT_MAX_TOKENS로 늘린다.
+    system_prompt 미지정 시 중립적 설명 프롬프트를 사용한다.
+    """
+    folder = Path(req.path)
+    if not folder.is_dir():
+        raise HTTPException(status_code=400, detail=f"폴더가 존재하지 않습니다: {req.path}")
+    all_frames = collect_frames(folder)
+    if not all_frames:
+        raise HTTPException(status_code=400, detail=f"프레임이 없습니다: {req.path}")
+    # NUM_FRAMES와 무관하게 대표 프레임 한 장만 사용한다.
+    frames = select_frames(all_frames, 1)
+
+    request_id = str(uuid.uuid4())[:8]
+    # 사용자가 준 system_prompt를 살리되, 언어 고정 문구를 뒤에 붙여 한국어 응답을 강제.
+    base_system = req.system_prompt or DESCRIBE_SYSTEM_PROMPT
+    system_prompt = f"{base_system} {KOREAN_ONLY_INSTRUCTION}"
+
+    log.info("prompt 시작 | req=%s | 폴더=%s | 프레임=%s | max_tokens=%d",
+             request_id, req.path, frames[0].name, PROMPT_MAX_TOKENS)
+    t0 = time.perf_counter()
+
+    async with _lock:
+        image_paths = await asyncio.to_thread(_resize_frames, frames, request_id)
+        raw = await asyncio.to_thread(
+            _run_vlm, image_paths, req.prompt, system_prompt, PROMPT_MAX_TOKENS,
+        )
+    elapsed = time.perf_counter() - t0
+
+    images = await asyncio.to_thread(_inspect_images, image_paths)
+    await asyncio.to_thread(_cleanup_resized, request_id)
+
+    log.info("prompt 완료 | req=%s | %.2fs", request_id, elapsed)
+
+    return {
+        "request_id": request_id,
+        "response": raw.strip(),
+        "frame_used": str(frames[0]),
+        # 모델에 실제로 입력된 프레임(리사이즈 후 경로/크기/로드여부).
+        "images_fed": images,
         "elapsed_sec": round(elapsed, 3),
     }
 
